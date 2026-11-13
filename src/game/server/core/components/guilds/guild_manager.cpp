@@ -1118,14 +1118,21 @@ void CGuildManager::OnSyncEvent(std::string EventName, const CServerSync::SReque
 		if(GetGuildByID(Req.Value))
 			return;
 
+		// The callback runs on a later game tick, so it must not keep a pointer to
+		// this component: a heavy reload deletes every game server and its
+		// components while the query is still in flight. Resolve the world and the
+		// manager again when the result arrives, like the sync event dispatcher does.
+		const int WorldID = GS()->GetWorldID();
 		auto pSelect = Database->Prepare<DB::SELECT>("*", TW_GUILDS_TABLE, "WHERE ID = '{}'", Req.Value);
-		pSelect->AtExecute([this, GuildID = Req.Value](ResultPtr pRes)
+		pSelect->AtExecute([WorldID, GuildID = Req.Value](ResultPtr pRes)
 		{
-			if(GetGuildByID(GuildID) || !pRes->next())
+			auto* pGS = static_cast<CGS*>(Instance::GameServer(WorldID));
+			auto* pManager = pGS ? pGS->Core()->GuildManager() : nullptr;
+			if(!pManager || pManager->GetGuildByID(GuildID) || !pRes->next())
 				return;
 
 			CGuild::CreateElement(GuildID)->InitFromRow(pRes);
-			GS()->Chat(-1, "New guilds '{~}' have been created!", pRes->getString("Name").c_str());
+			pGS->Chat(-1, "New guilds '{~}' have been created!", pRes->getString("Name").c_str());
 		});
 	}
 
@@ -1135,10 +1142,14 @@ void CGuildManager::OnSyncEvent(std::string EventName, const CServerSync::SReque
 		if(!GetGuildByID(Req.Value))
 			return;
 
+		// see GUILD_CREATE: never capture the component across the query
+		const int WorldID = GS()->GetWorldID();
 		auto pSelect = Database->Prepare<DB::SELECT>("*", TW_GUILDS_TABLE, "WHERE ID = '{}'", Req.Value);
-		pSelect->AtExecute([this, GuildID = Req.Value](ResultPtr pRes)
+		pSelect->AtExecute([WorldID, GuildID = Req.Value](ResultPtr pRes)
 		{
-			const auto pGuild = GetGuildByID(GuildID);
+			auto* pGS = static_cast<CGS*>(Instance::GameServer(WorldID));
+			auto* pManager = pGS ? pGS->Core()->GuildManager() : nullptr;
+			const auto pGuild = pManager ? pManager->GetGuildByID(GuildID) : nullptr;
 			if(!pGuild || !pRes->next())
 				return;
 

@@ -44,10 +44,19 @@ void CAuctionManager::OnSyncEvent(std::string EventName, const CServerSync::SReq
 		if(Req.Value <= 0 || GetSlot(Req.Value))
 			return;
 
+		// The callback runs on a later game tick, so it must not keep a pointer to
+		// this component: a heavy reload deletes every game server and its
+		// components while the query is still in flight. The slot container is
+		// static and is rebuilt by OnPreInit during that reload, so the callback
+		// needs no component at all and only has to skip an already known slot.
 		auto pSelect = Database->Prepare<DB::SELECT>("*", TW_AUCTION_SLOTS_TABLE, "WHERE ID = '{}'", Req.Value);
-		pSelect->AtExecute([this, SlotID = Req.Value](ResultPtr pRes)
+		pSelect->AtExecute([SlotID = Req.Value](ResultPtr pRes)
 		{
-			if(GetSlot(SlotID) || !pRes->next())
+			const bool AlreadyKnown = std::ranges::any_of(CAuctionSlot::Data(), [SlotID](const CAuctionSlot* pSlot)
+			{
+				return pSlot->GetID() == SlotID;
+			});
+			if(AlreadyKnown || !pRes->next())
 				return;
 
 			CItem Item(pRes->getInt("ItemID"), pRes->getInt("Value"), pRes->getInt("Enchant"));

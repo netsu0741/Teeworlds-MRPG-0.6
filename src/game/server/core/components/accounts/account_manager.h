@@ -5,6 +5,7 @@
 #include <game/server/core/mmo_component.h>
 #include <base/timeperiod.h>
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -121,6 +122,12 @@ private:
 	std::vector<int> m_vSessionEvents {};
 	std::mutex m_SessionMutex {};
 	int m_LastSessionCheck = 0;
+
+	// Alive only while this component is. Async callbacks hold a weak reference so
+	// they can tell that a heavy reload deleted the component they were queued for
+	// instead of locking m_SessionMutex and writing m_vSessionValidations on freed
+	// memory. Same idiom as DbAsync::CContextBase::m_pConnectionLifetime.
+	std::shared_ptr<void> m_pLifetime { std::make_shared<int>(0) };
 };
 
 #endif

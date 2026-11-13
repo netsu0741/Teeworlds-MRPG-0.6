@@ -794,8 +794,18 @@ void CAccountManager::ValidateLocalSessions(int AccountID, int AckEventID, int A
 
 	auto pCheck = Database->Prepare<DB::SELECT>("ServerID, SessionToken", ACCOUNT_SESSIONS_TABLE,
 		"WHERE AccountID = '{}'", AccountID);
-	pCheck->AtExecute([this, AccountID, AckEventID, AckWorldID, AckTargetServerID](ResultPtr pRes)
+	// The callback runs on a later game tick and touches members of this
+	// component, so it must be able to notice that the component is gone: a heavy
+	// reload deletes every game server and its components while the query is still
+	// in flight, and it never drains the pending callbacks first. Locking the
+	// lifetime token keeps the weak reference from expiring mid-callback.
+	std::weak_ptr<void> Lifetime = m_pLifetime;
+	pCheck->AtExecute([this, Lifetime, AccountID, AckEventID, AckWorldID, AckTargetServerID](ResultPtr pRes)
 	{
+		const auto pLifetime = Lifetime.lock();
+		if(!pLifetime)
+			return;
+
 		if(!pRes->next())
 			return;
 
