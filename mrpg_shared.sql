@@ -2189,6 +2189,7 @@ ALTER TABLE `tw_accounts_data`
 --
 ALTER TABLE `tw_accounts_items`
   ADD PRIMARY KEY (`ID`),
+  ADD UNIQUE KEY `uq_account_item` (`UserID`,`ItemID`),
   ADD KEY `OwnerID` (`UserID`),
   ADD KEY `ItemID` (`ItemID`);
 
@@ -2204,7 +2205,8 @@ ALTER TABLE `tw_accounts_mailbox`
 -- Indexes for table `tw_accounts_professions`
 --
 ALTER TABLE `tw_accounts_professions`
-  ADD PRIMARY KEY (`ID`);
+  ADD PRIMARY KEY (`ID`),
+  ADD UNIQUE KEY `uq_account_profession` (`UserID`,`ProfessionID`);
 
 --
 -- Indexes for table `tw_accounts_quests`

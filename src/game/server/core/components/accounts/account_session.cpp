@@ -15,10 +15,11 @@ namespace AccountSession
 		constexpr int TOKEN_LENGTH = 48;
 		constexpr size_t BATCH_SIZE = 100;
 
-		// A row may be taken if its owner is active, or its reservation has gone stale.
+		// A reservation can be waiting on another server's writes. Age alone
+		// cannot prove those writes are finished, so never steal a reservation.
 		std::string ClaimableCondition()
 		{
-			return fmt_default("(Heartbeat <> 0 OR UpdatedAt < NOW() - INTERVAL {} SECOND)", HEARTBEAT_STALE_SECONDS);
+			return "Heartbeat <> 0";
 		}
 	}
 
@@ -31,7 +32,7 @@ namespace AccountSession
 
 	void ReadRecord(int AccountID, ReadCallback Done)
 	{
-		auto pRead = Database->Prepare<DB::SELECT>("ServerID, ClientID, SessionToken, Heartbeat, UNIX_TIMESTAMP() AS CurrentUnixTime", TABLE,
+		auto pRead = Database->Prepare<DB::SELECT>("ServerID, ClientID, SessionToken, Heartbeat", TABLE,
 			"WHERE AccountID = '{}'", AccountID);
 		pRead->PrimaryRead(); // the row arbitrates between servers: a stale snapshot fails the claim below
 		pRead->AtExecute([Done](ResultPtr pRes)
@@ -53,11 +54,6 @@ namespace AccountSession
 				Record.m_Token = pRes->getString("SessionToken");
 				Record.m_Heartbeat = pRes->getInt("Heartbeat");
 
-				const int Now = pRes->getInt("CurrentUnixTime");
-				if(Record.m_Heartbeat == 0)
-					Record.m_HeartbeatAge = HEARTBEAT_STALE_SECONDS; // the owning login never finished
-				else if(Record.m_Heartbeat > 1 && Now >= Record.m_Heartbeat)
-					Record.m_HeartbeatAge = Now - Record.m_Heartbeat;
 			}
 			Done(Record);
 		});

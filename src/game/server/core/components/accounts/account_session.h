@@ -18,7 +18,6 @@
 namespace AccountSession
 {
 	constexpr int CLAIM_SECONDS = 30; // time limit of one login, from its start
-	constexpr int HEARTBEAT_STALE_SECONDS = 45; // older heartbeat (or reservation) counts as dead
 
 	// One session: the account and the token it logged in with.
 	struct SKey
@@ -35,7 +34,6 @@ namespace AccountSession
 		int m_ClientID {};
 		std::string m_Token {};
 		int m_Heartbeat {}; // 0: the owning login never finished
-		int m_HeartbeatAge { -1 }; // seconds since the last heartbeat, -1 if unknown
 	};
 
 	// A login's attempt to take an account: the new token and the row it replaces.
@@ -58,8 +56,8 @@ namespace AccountSession
 	// snapshot; TryClaim checks it again.
 	void ReadRecord(int AccountID, ReadCallback Done);
 
-	// Takes the account if the row still holds the token we read and it may be taken
-	// (active, or its reservation is stale). A refusal leaves the row untouched.
+	// Takes the account if the row still holds the token we read and is active.
+	// Incomplete reservations are never stolen based only on age.
 	void TryClaim(const SClaim& Claim, DoneCallback Done);
 
 	// Turns the reservation into an active session (heartbeat set).

@@ -46,7 +46,8 @@ public:
 	AccountCodeResult LoginAccountRaw(int ClientID, const char* pLogin, const char* pPassword);
 
 	// Starts a login whose claim on the account has been written.
-	void BeginSessionTakeover(CPlayer* pPlayer, const AccountSession::SClaim& Claim, bool RecommendPin);
+	void BeginSessionTakeover(CPlayer* pPlayer, const AccountSession::SClaim& Claim, std::function<void()> OnReady);
+	bool CompleteLogin(int ClientID, const AccountSession::SClaim& Claim, bool RecommendPin);
 	void LoadAccount(CPlayer *pPlayer, bool FirstInitilize = false, int64_t ClaimDeadline = 0);
 	void SetPinCode(int ClientID, const char* pCurrentPasswordOrPin, const char* pNewPin, bool IsChangingPin);
 	void ChangePassword(int ClientID, const char* pOldPassword, const char* pNewPassword, const char* pPinCode);
@@ -82,7 +83,7 @@ private:
 	{
 		int m_ClientID {};
 		AccountSession::SClaim m_Claim {};
-		bool m_RecommendPin {};
+		std::function<void()> m_OnReady {};
 		int m_EventID {}; // takeover request to the previous owner's server, 0 if none
 		bool m_RelayFailed {};
 		bool m_RemoteAck {};
@@ -99,7 +100,6 @@ private:
 
 	EPendingState EvaluatePendingLogin(const SPendingLogin& Pending, int64_t Now) const;
 	void ProcessPendingLogins();
-	bool CompleteLogin(int ClientID, const AccountSession::SClaim& Claim, bool RecommendPin);
 	void FailPendingLogin(const SPendingLogin& Pending);
 
 	std::vector<SLocalSession> CollectLocalSessions(int AccountID = 0) const;

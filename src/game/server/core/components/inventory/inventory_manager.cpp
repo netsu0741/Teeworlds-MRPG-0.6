@@ -78,7 +78,14 @@ void CInventoryManager::OnPreInit()
 void CInventoryManager::OnPlayerLogin(CPlayer* pPlayer)
 {
 	const int ClientID = pPlayer->GetCID();
-	ResultPtr pRes = Database->Execute<DB::SELECT>("*", "tw_accounts_items", "WHERE UserID = '{}'", pPlayer->Account()->GetID());
+	auto pQuery = Database->Prepare<DB::SELECT>("*", "tw_accounts_items", "WHERE UserID = '{}'", pPlayer->Account()->GetID());
+	pQuery->PrimaryRead(); // a previous session may have saved through another bridge
+	ResultPtr pRes = pQuery->Execute();
+	if(!pRes || !*pRes)
+	{
+		pPlayer->Account()->SetLoadFailed();
+		return;
+	}
 	while(pRes->next())
 	{
 		const auto ItemID = pRes->getInt("ItemID");

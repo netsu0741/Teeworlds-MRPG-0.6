@@ -15,6 +15,7 @@
 #include <game/server/core/components/mails/mailbox_manager.h>
 #include <game/server/core/components/worlds/world_data.h>
 #include <game/server/core/tools/db_async_context.h>
+#include <game/server/core/tools/account_save_coordinator.h>
 
 #include <teeother/components/localization.h>
 
@@ -197,6 +198,13 @@ class DbAuthorization
 
 		auto& Claim = pContext->Data().m_Claim;
 		Claim.m_Previous = *Owner;
+		// Server ID zero cannot distinguish a local session from another server.
+		// Never take over an owner whose location cannot be verified.
+		if(Claim.m_Previous.m_Exists && Claim.m_Previous.m_ServerID <= 0)
+		{
+			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: previous session has no verifiable server ID. Contact an administrator.");
+			return;
+		}
 		AccountSession::TryClaim(Claim, [pContext](bool Claimed) { OnClaimed(pContext, Claimed); });
 	}
 
@@ -205,7 +213,8 @@ class DbAuthorization
 		const auto& Claim = pContext->Data().m_Claim;
 		if(Claimed && GetPlayer(pContext) && time_get() < Claim.m_Deadline)
 		{
-			LoadAccountData(pContext);
+			auto* pPlayer = GetPlayer(pContext);
+			pContext->Data().m_pAccountManager->BeginSessionTakeover(pPlayer, Claim, [pContext] { LoadAccountData(pContext); });
 			return;
 		}
 
@@ -264,15 +273,33 @@ class DbAuthorization
 		if(!pPlayer->GetSharedData().m_GuestLogin.empty() && Data.m_Login != pPlayer->GetSharedData().m_GuestLogin)
 			pPlayer->GetSharedData().m_GuestLogin.clear();
 
-		pPlayer->Account()->Init(Claim.m_AccountID, pContext->GetClientID(), Data.m_Login.c_str(), Data.m_Language, Data.m_LoginDate, std::move(pRes));
+		if(!pPlayer->Account()->Init(Claim.m_AccountID, pContext->GetClientID(), Data.m_Login.c_str(), Data.m_Language, Data.m_LoginDate, std::move(pRes)))
+		{
+			CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim](bool Success) {
+				if(Success)
+					AccountSession::Release(Claim);
+			});
+			pContext->Server()->Kick(pContext->GetClientID(), "Account professions could not be loaded; please retry");
+			return;
+		}
 		pPlayer->Account()->SetSessionToken(Claim.m_Token);
 		if(time_get() >= Claim.m_Deadline)
 		{
-			AccountSession::Release(Claim);
+			CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim](bool Success) {
+				if(Success)
+					AccountSession::Release(Claim);
+			});
 			pContext->Server()->Kick(pContext->GetClientID(), "Account session reservation expired");
 			return;
 		}
-		Data.m_pAccountManager->BeginSessionTakeover(pPlayer, Claim, Data.m_PinCode.empty() && !pPlayer->IsGuestLogin());
+		if(!Data.m_pAccountManager->CompleteLogin(pContext->GetClientID(), Claim, Data.m_PinCode.empty() && !pPlayer->IsGuestLogin()))
+		{
+			CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim](bool Success) {
+				if(Success)
+					AccountSession::Release(Claim);
+			});
+			pContext->Server()->Kick(pContext->GetClientID(), "Account session reservation expired");
+		}
 	}
 
 public:
@@ -505,15 +532,22 @@ void CAccountManager::OnClientReset(int ClientID)
 
 	// Only the row that still carries our token is removed; a newer owner's row stays.
 	if(AccountID > 0 && !SessionToken.empty() && Ready)
-		AccountSession::Remove({ AccountID, SessionToken });
+	{
+		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [AccountID, SessionToken](bool Success) {
+			if(Success)
+				AccountSession::Remove({ AccountID, SessionToken });
+			else
+				dbg_msg("account", "Session for account %d retained because a save failed", AccountID);
+		});
+	}
 
 	CAccountSharedData::ms_aPlayerSharedData.erase(ClientID);
 	CAccountData::ms_aData.erase(ClientID);
 }
 
-void CAccountManager::BeginSessionTakeover(CPlayer* pPlayer, const AccountSession::SClaim& Claim, bool RecommendPin)
+void CAccountManager::BeginSessionTakeover(CPlayer* pPlayer, const AccountSession::SClaim& Claim, std::function<void()> OnReady)
 {
-	if(!pPlayer || Claim.m_Token.empty() || pPlayer->Account()->GetID() != Claim.m_AccountID)
+	if(!pPlayer || Claim.m_Token.empty() || !OnReady)
 		return;
 
 	// Sessions of this account on this server end now. The login completes only
@@ -523,7 +557,7 @@ void CAccountManager::BeginSessionTakeover(CPlayer* pPlayer, const AccountSessio
 	SPendingLogin Pending {};
 	Pending.m_ClientID = pPlayer->GetCID();
 	Pending.m_Claim = Claim;
-	Pending.m_RecommendPin = RecommendPin;
+	Pending.m_OnReady = std::move(OnReady);
 	Pending.m_StartTime = time_get();
 	if(NeedsRemoteTakeover(Claim))
 	{
@@ -641,15 +675,6 @@ bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& 
 	if(time_get() >= Claim.m_Deadline)
 		return false;
 
-	pGS->Chat(ClientID, "Login successful. Welcome back!");
-	if(NeedsRemoteTakeover(Claim))
-		pGS->Chat(ClientID, "Warning: The previous account session on another server was terminated.");
-	if(RecommendPin)
-	{
-		pGS->Chat(ClientID, "Security recommendation: set a PIN code.");
-		pGS->Chat(ClientID, "Command: /set_pin <current_password> <new_pin>.");
-	}
-
 	if(pPlayer->m_pMotdMenu)
 		pPlayer->CloseMotdMenu();
 	pGS->m_pController->DoTeamChange(pPlayer);
@@ -660,6 +685,15 @@ bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& 
 	pPlayer = pGS ? pGS->GetPlayer(ClientID, false) : nullptr;
 	if(!pPlayer || pPlayer->Account()->GetSessionToken() != Claim.m_Token || !pPlayer->Account()->IsReadyToPlay() || time_get() >= Claim.m_Deadline)
 		return false;
+
+	pGS->Chat(ClientID, "Login successful. Welcome back!");
+	if(NeedsRemoteTakeover(Claim))
+		pGS->Chat(ClientID, "Warning: The previous account session on another server was terminated.");
+	if(RecommendPin)
+	{
+		pGS->Chat(ClientID, "Security recommendation: set a PIN code.");
+		pGS->Chat(ClientID, "Command: /set_pin <current_password> <new_pin>.");
+	}
 
 	// The reservation stays until the row is active, so no other login can take
 	// over in the meantime. A failed write ends this session.
@@ -678,7 +712,7 @@ CAccountManager::EPendingState CAccountManager::EvaluatePendingLogin(const SPend
 {
 	auto* pGS = static_cast<CGS*>(Instance::GameServerPlayer(Pending.m_ClientID));
 	auto* pPlayer = pGS ? pGS->GetPlayer(Pending.m_ClientID, false) : nullptr;
-	if(!pPlayer || !pPlayer->IsAuthed())
+	if(!pPlayer)
 		return EPendingState::Abandoned;
 
 	if(Now >= Pending.m_Claim.m_Deadline)
@@ -688,18 +722,15 @@ CAccountManager::EPendingState CAccountManager::EvaluatePendingLogin(const SPend
 	{
 		if(!Pending.m_RelayFailed && Now < Pending.m_StartTime + ACCOUNT_SESSION_TAKEOVER_TIMEOUT_SECONDS * time_freq())
 			return EPendingState::Wait;
-
-		// No answer from the previous server: only a stale heartbeat proves its session is gone.
-		const int ElapsedSeconds = static_cast<int>((Now - Pending.m_StartTime) / time_freq());
-		const int Age = Pending.m_Claim.m_Previous.m_HeartbeatAge;
-		const bool Stale = Age >= 0 && Age + ElapsedSeconds >= AccountSession::HEARTBEAT_STALE_SECONDS;
-		if(!Stale)
-			return EPendingState::Failed;
+		// A stale heartbeat does not prove outstanding saves reached the primary.
+		return EPendingState::Failed;
 	}
 
-	// Wait until the old session on this server has disconnected (OnClientReset).
-	if(HasOtherLocalSession(Pending.m_Claim.m_AccountID, Pending.m_Claim.m_Token))
+	if(HasOtherLocalSession(Pending.m_Claim.m_AccountID, Pending.m_Claim.m_Token) ||
+		CAccountSaveCoordinator::Instance().Pending(Pending.m_Claim.m_AccountID))
 		return EPendingState::Wait;
+	if(CAccountSaveCoordinator::Instance().Failed(Pending.m_Claim.m_AccountID))
+		return EPendingState::Failed;
 
 	return EPendingState::Ready;
 }
@@ -735,15 +766,7 @@ void CAccountManager::ProcessPendingLogins()
 		FailPendingLogin(Pending);
 
 	for(const auto& Pending : vReady)
-	{
-		if(CompleteLogin(Pending.m_ClientID, Pending.m_Claim, Pending.m_RecommendPin))
-			continue;
-
-		AccountSession::Release(Pending.m_Claim);
-		const auto It = CAccountData::ms_aData.find(Pending.m_ClientID);
-		if(It != CAccountData::ms_aData.end() && It->second.GetSessionToken() == Pending.m_Claim.m_Token)
-			Server()->Kick(Pending.m_ClientID, "Account session reservation expired");
-	}
+		Pending.m_OnReady();
 }
 
 void CAccountManager::OnSyncEvent(std::string EventName, const CServerSync::SRequest& Req)
@@ -771,9 +794,15 @@ void CAccountManager::OnSyncEvent(std::string EventName, const CServerSync::SReq
 	// Another server claimed this account: end the local sessions that lost the row,
 	// then acknowledge. The ack is sent only if the check succeeded.
 	const std::string AckTarget = std::string(syncevents::ACCOUNT_SESSION_TAKEOVER_ACK_PREFIX) + std::to_string(Req.ServerID);
-	VerifySessions(CollectLocalSessions(Req.Value), [AckTarget, WorldID = Req.WorldID, EventID = Req.ID]()
+	VerifySessions(CollectLocalSessions(Req.Value), [this, AccountID = Req.Value, AckTarget, WorldID = Req.WorldID, EventID = Req.ID]()
 	{
-		Sync->Push(AckTarget.c_str(), WorldID, EventID);
+		// Kick can be refused. Never acknowledge while any local owner remains.
+		if(!CollectLocalSessions(AccountID).empty())
+			return;
+		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [this, AccountID, AckTarget, WorldID, EventID](bool Success) {
+			if(Success && CollectLocalSessions(AccountID).empty())
+				Sync->Push(AckTarget.c_str(), WorldID, EventID);
+		});
 	});
 }
 
@@ -1804,6 +1833,11 @@ void CAccountManager::LoadAccount(CPlayer* pPlayer, bool FirstInitilize, int64_t
 
 	// on player login
 	Core()->OnPlayerLogin(pPlayer);
+	if(pAccount->HasLoadFailed())
+	{
+		Server()->Kick(ClientID, "Account inventory could not be loaded; please retry");
+		return;
+	}
 
 	// initialize default item's & settings
 	auto InitSettingsItem = [pPlayer](const std::unordered_map<int, int>& pItems)

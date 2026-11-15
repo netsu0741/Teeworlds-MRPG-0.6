@@ -170,7 +170,11 @@ bool CMmoController::OnClientMessage(int MsgID, void* pRawMsg, int ClientID) con
 void CMmoController::OnPlayerLogin(CPlayer* pPlayer) const
 {
 	for(const auto& pComponent : m_System.m_vComponents)
+	{
 		pComponent->OnPlayerLogin(pPlayer);
+		if(pPlayer->Account()->HasLoadFailed())
+			return;
+	}
 }
 
 

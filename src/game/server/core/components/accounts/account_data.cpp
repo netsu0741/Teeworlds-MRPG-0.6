@@ -73,7 +73,7 @@ const CTeeInfo& CAccountData::GetTeeInfo() const
 	return m_TeeInfos;
 }
 
-void CAccountData::Init(int ID, int ClientID, const char* pLogin, std::string Language, std::string LoginDate, ResultPtr pResult)
+bool CAccountData::Init(int ID, int ClientID, const char* pLogin, std::string Language, std::string LoginDate, ResultPtr pResult)
 {
 	// asserts
 	dbg_assert(m_ID <= 0 || !pResult, "Unique AccountID cannot change the value more than 1 time");
@@ -104,7 +104,8 @@ void CAccountData::Init(int ID, int ClientID, const char* pLogin, std::string La
 
 
 	// initialize sub account data.
-	InitProfessions();
+	if(!InitProfessions())
+		return false;
 	InitSharedEquipments(pResult->getString("EquippedSlots"));
 	InitEquipmentPresets(pResult->getString("EquipmentPresets"));
 	InitAchievements();
@@ -118,9 +119,10 @@ void CAccountData::Init(int ID, int ClientID, const char* pLogin, std::string La
 
 	// update account base
 	pServer->UpdateAccountBase(m_ID, pServer->ClientName(m_ClientID), m_RatingSystem.GetRating());
+	return true;
 }
 
-void CAccountData::InitProfessions()
+bool CAccountData::InitProfessions()
 {
 	m_vProfessions.clear();
 
@@ -135,7 +137,11 @@ void CAccountData::InitProfessions()
 
 	// load professions data
 	std::map<ProfessionIdentifier, std::string> vmProfessionsData {};
-	const auto pResult = Database->Execute<DB::SELECT>("*", "tw_accounts_professions", "WHERE UserID = '{}'", m_ID);
+	auto pQuery = Database->Prepare<DB::SELECT>("*", "tw_accounts_professions", "WHERE UserID = '{}'", m_ID);
+	pQuery->PrimaryRead();
+	const auto pResult = pQuery->Execute();
+	if(!pResult || !*pResult)
+		return false;
 	while(pResult->next())
 	{
 		const auto ProfessionID = (ProfessionIdentifier)pResult->getInt("ProfessionID");
@@ -149,6 +155,7 @@ void CAccountData::InitProfessions()
 		const auto optData = it != vmProfessionsData.end() ? std::make_optional<std::string>(it->second) : std::nullopt;
 		Profession.Init(m_ClientID, optData);
 	}
+	return true;
 }
 
 void CAccountData::InitSharedEquipments(const std::string& EquippedSlots)

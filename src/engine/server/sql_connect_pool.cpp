@@ -3,6 +3,7 @@
 #include "sql_lost_query_logger.h"
 
 #include <mutex>
+#include <tuple>
 
 namespace
 {
@@ -249,17 +250,21 @@ namespace
 	class CAsyncDmlContext : public CAsyncQueryContext<CallbackUpdatePtr>
 	{
 		CallbackInsertIdPtr m_InsertId;
+		CallbackDmlStatusPtr m_Status;
 
 	public:
 		using CAsyncQueryContext<CallbackUpdatePtr>::CAsyncQueryContext;
 
 		void UseInsertId(CallbackInsertIdPtr Callback) { m_InsertId = std::move(Callback); }
+		void UseStatus(CallbackDmlStatusPtr Callback) { m_Status = std::move(Callback); }
 		bool WantsInsertId() const { return static_cast<bool>(m_InsertId); }
 
-		void Notify(bool Updated, int64_t InsertID) const
+		void Notify(bool Success, bool Updated, int64_t InsertID) const
 		{
 			if(m_InsertId)
 				CConectionPool::PostCallback([Callback = m_InsertId, InsertID] { Callback(InsertID); });
+			else if(m_Status)
+				CConectionPool::PostCallback([Callback = m_Status, Success, Updated] { Callback(Success, Updated); });
 			else
 				NotifyDml(Callback(), Updated);
 		}
@@ -346,7 +351,7 @@ namespace
 
 				LogLostQuery("async dml connection unavailable", pContext->Type(), pContext->Query());
 				dbg_msg("SQL Error", "Async DML failed to create a connection. Query: %s", MaskedQuery(pContext->Query()).c_str());
-				pContext->Notify(false, 0);
+				pContext->Notify(false, false, 0);
 				return;
 			}
 
@@ -360,7 +365,7 @@ namespace
 				pStmt.reset();
 
 				const int64_t InsertID = hasUpdated && pContext->WantsInsertId() ? ReadLastInsertId(pConnection) : 0;
-				pContext->Notify(hasUpdated, InsertID);
+				pContext->Notify(true, hasUpdated, InsertID);
 			}
 			catch(SQLException& e)
 			{
@@ -381,7 +386,7 @@ namespace
 				}
 
 				dbg_msg("SQL Error", "Async DML failed: %s. Query: %s", e.what(), MaskedQuery(pContext->Query()).c_str());
-				pContext->Notify(false, 0);
+				pContext->Notify(false, false, 0);
 			}
 		};
 	}
@@ -391,7 +396,7 @@ namespace
 		if(!pThreadPool)
 		{
 			dbg_msg("SQL Error", "Async DML failed to enqueue: thread pool unavailable. Query: %s", MaskedQuery(pContext->Query()).c_str());
-			pContext->Notify(false, 0);
+			pContext->Notify(false, false, 0);
 			return;
 		}
 		pThreadPool->Enqueue(CreateAsyncDmlTask(pContext, pThreadPool), pContext->Type(), MaskedQuery(pContext->Query()));
@@ -593,7 +598,8 @@ void CThreadPool::WorkerThread()
 				}
 				else
 				{
-					EnqueueRetry(std::move(task), "Worker has no valid connection", MaxRetriesForType(task.m_Type));
+					// The task must notify its callback when connection retries are exhausted.
+					task.m_Task(nullptr, task.m_RetryCount);
 				}
 			}
 			catch(SQLException& e)
@@ -772,6 +778,33 @@ bool CConectionPool::InitDatabases()
 		return false;
 	}
 
+	// Upserts are only safe when these account/key pairs are unique. Do not
+	// silently start on an old schema: it would create conflicting snapshots.
+	try
+	{
+		for(const auto& [Table, Columns, Reverse] : {
+			std::tuple{ "tw_accounts_items", "UserID,ItemID", "ItemID,UserID" },
+			std::tuple{ "tw_accounts_professions", "UserID,ProfessionID", "ProfessionID,UserID" } })
+		{
+			std::unique_ptr<Statement> pStmt(pSharedConnection->createStatement());
+			const auto Query = fmt_default("/*mrpg:primary*/ SELECT INDEX_NAME FROM information_schema.STATISTICS "
+				"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}' GROUP BY INDEX_NAME "
+				"HAVING MAX(NON_UNIQUE) = 0 AND COUNT(*) = 2 AND SUM(SUB_PART IS NOT NULL) = 0 "
+				"AND GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) IN ('{}', '{}')", Table, Columns, Reverse);
+			std::unique_ptr<ResultSet> pIndex(pStmt->executeQuery(Query.c_str()));
+			if(!pIndex || !pIndex->next())
+			{
+				dbg_msg("SQL Error", "Required unique account index missing on %s. Follow docs/account-save-migration.md before starting.", Table);
+				return false;
+			}
+		}
+	}
+	catch(SQLException& e)
+	{
+		dbg_msg("SQL Error", "Cannot verify account save indexes: %s", e.what());
+		return false;
+	}
+
 	std::string InShared;
 	for(const std::string_view Table : LOCAL_TABLES)
 	{
@@ -911,6 +944,13 @@ void CConectionPool::CResultSelect::AtExecute(CallbackResultPtr pCallbackResult)
 void CConectionPool::CResultQuery::AtExecute(CallbackUpdatePtr pCallbackResult, int DelayMilliseconds)
 {
 	auto pContext = std::make_shared<CAsyncDmlContext>(m_Query, m_TypeQuery, std::move(pCallbackResult), DelayMilliseconds);
+	EnqueueDml(Database->GetThreadPool(m_Kind), pContext);
+}
+
+void CConectionPool::CResultQuery::AtExecuteWithStatus(CallbackDmlStatusPtr pCallbackResult, int DelayMilliseconds)
+{
+	auto pContext = std::make_shared<CAsyncDmlContext>(m_Query, m_TypeQuery, CallbackUpdatePtr(), DelayMilliseconds);
+	pContext->UseStatus(std::move(pCallbackResult));
 	EnqueueDml(Database->GetThreadPool(m_Kind), pContext);
 }
 

@@ -1,9 +1,37 @@
 #include "profession.h"
 #include <engine/server.h>
+#include <engine/server/sql_string_helpers.h>
 
 #include <game/server/entity_manager.h>
 #include <game/server/gamecontext.h>
 #include <game/server/core/components/achievements/achievement_data.h>
+#include <game/server/core/tools/account_save_coordinator.h>
+#include <game/server/core/tools/db_async_context.h>
+
+namespace
+{
+	void SaveProfession(CPlayer* pPlayer, int ProfessionID, std::string Data)
+	{
+		const int UserID = pPlayer->Account()->GetID();
+		auto pContext = DbAsync::MakeContext(pPlayer->GetCID());
+		CAccountSaveCoordinator::Instance().Submit(UserID, "profession:" + std::to_string(ProfessionID),
+			[UserID, ProfessionID, Data = sqlstr::HexEncode(Data), pContext](CAccountSaveCoordinator::Done Done) {
+				auto Complete = [Done, pContext, UserID](bool Success, bool Updated) {
+					(void)Updated; // a valid no-op is still a successful save
+					Done(Success);
+					if(!Success)
+					{
+						dbg_msg("SQL Error", "Profession save failed for account %d; session handover is blocked", UserID);
+						if(auto* pCurrent = pContext->GetPlayer(); pCurrent && pCurrent->IsAuthed() && pCurrent->Account()->GetID() == UserID)
+							pContext->Server()->Kick(pContext->GetClientID(), "Profession save failed; contact an administrator");
+					}
+				};
+				Database->ExecuteWithStatus<DB::INSERT>(Complete, "tw_accounts_professions",
+					"(UserID, ProfessionID, Data) VALUES ('{}', '{}', UNHEX('{}')) ON DUPLICATE KEY UPDATE Data = VALUES(Data)",
+					UserID, ProfessionID, Data);
+			});
+	}
+}
 
 CGS* CProfession::GS() const
 {
@@ -31,10 +59,7 @@ void CProfession::Init(int ClientID, const std::optional<std::string>& jsonData)
 	// first initialize
 	if(!jsonData.has_value())
 	{
-		const auto Data = GetPreparedJsonString();
-		const auto AccountID = GetPlayer()->Account()->GetID();
-		Database->Execute<DB::INSERT>("tw_accounts_professions", "(UserID, ProfessionID, Data) VALUES ('{}', '{}', '{}')",
-			AccountID, (int)m_ProfessionID, Data);
+		SaveProfession(GetPlayer(), (int)m_ProfessionID, GetPreparedJsonString());
 		return;
 	}
 
@@ -55,11 +80,7 @@ void CProfession::Init(int ClientID, const std::optional<std::string>& jsonData)
 void CProfession::Save()
 {
 	// save to database
-	const auto* pPlayer = GetPlayer();
-	const auto Data = GetPreparedJsonString();
-	const auto AccountID = pPlayer->Account()->GetID();
-	Database->Execute<DB::UPDATE>("tw_accounts_professions", "Data = '{}' WHERE ProfessionID = '{}' AND UserID = '{}'",
-		Data, (int)m_ProfessionID, AccountID);
+	SaveProfession(GetPlayer(), (int)m_ProfessionID, GetPreparedJsonString());
 }
 
 void CProfession::AddExperience(uint64_t Experience)
@@ -93,15 +114,11 @@ void CProfession::AddExperience(uint64_t Experience)
 
 			GS()->Chat(m_ClientID, "'{}' Level UP. Now Level {}!", pProfessionName, m_Level);
 			GS()->Core()->SaveAccount(pPlayer, SAVE_PROFESSION);
-			Save();
 		}
 	}
 
-	// randomly save the account stats
-	if(rand() % 2 == 0)
-	{
-		Save();
-	}
+	// A final gain must not depend on another random save before disconnect.
+	Save();
 
 	// notify listener & progress bar
 	g_EventListenerManager.Notify<IEventListener::PlayerProfessionLeveling>(pPlayer, this, m_Level);

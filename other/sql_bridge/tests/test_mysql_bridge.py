@@ -580,6 +580,19 @@ class TestRouting(BridgeTestCase):
         self.assertTrue(self.primary.queries_matching("mrpg:primary"))   # forwarded unchanged
         self.assertFalse(self.replica.queries_matching("mrpg:primary"))
 
+    async def test_account_primary_hints_after_another_region_writes(self):
+        # Each bridge has its own write tracker; China cannot observe a write
+        # submitted through Europe. Account reads must explicitly use primary.
+        europe = await self.bridge(read_your_writes_grace_sec="60")
+        china = await self.bridge(read_your_writes_grace_sec="60")
+        writer = await self.client(europe)
+        reader = await self.client(china)
+        await writer.query("UPDATE tw_accounts_items SET Value = 20000 WHERE UserID = 1")
+        for table in ("tw_accounts_items", "tw_accounts_professions"):
+            query = "SELECT * FROM " + table + " WHERE UserID = 1"
+            self.assertEqual(await self.served_by(reader, query), "replica")
+            self.assertEqual(await self.served_by(reader, "/*mrpg:primary*/ " + query), "primary")
+
     async def test_use_pins_to_primary(self):
         b = await self.bridge()
         c1 = await self.client(b, db="mrpg_shared")

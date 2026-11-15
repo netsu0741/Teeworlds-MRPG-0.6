@@ -10,6 +10,7 @@
 #include <components/Eidolons/EidolonManager.h>
 #include <components/mails/mail_wrapper.h>
 #include <game/server/core/tools/db_async_context.h>
+#include <game/server/core/tools/account_save_coordinator.h>
 
 #include <game/server/core/scenarios/managers/scenario_world_manager.h>
 #include <game/server/core/scenarios/impl/scenario_world.h>
@@ -18,91 +19,35 @@ namespace
 {
 	class DbInventorySave
 	{
-		inline static std::unordered_map<uint64_t, uint64_t> ms_PendingSerials {};
-		inline static std::mutex ms_PendingSerialsLock {};
-
-		struct CSavePayload
-		{
-			int m_UserID{};
-			int m_ItemID{};
-			int m_Value{};
-			int m_Settings{};
-			int m_Enchant{};
-			int m_Durability{};
-			time_t m_ExpiresAt{};
-			std::string m_Data{};
-			uint64_t m_Key{};
-			uint64_t m_Serial{};
-		};
-		using CSaveContextPtr = std::shared_ptr<DbAsync::CContext<CSavePayload>>;
-		static uint64_t MakeKey(int UserID, int ItemID)
-		{
-			return (static_cast<uint64_t>(static_cast<uint32_t>(UserID)) << 32) | static_cast<uint32_t>(ItemID);
-		}
-
-		static bool IsLatest(const CSaveContextPtr& pContext)
-		{
-			std::lock_guard<std::mutex> Guard(ms_PendingSerialsLock);
-			const auto& Data = pContext->Data();
-			const auto it = ms_PendingSerials.find(Data.m_Key);
-			return it != ms_PendingSerials.end() && it->second == Data.m_Serial;
-		}
-
-		static uint64_t NextSerial(uint64_t Key)
-		{
-			std::lock_guard<std::mutex> Guard(ms_PendingSerialsLock);
-			return ++ms_PendingSerials[Key];
-		}
-
-		static bool ConsumeLatest(const CSaveContextPtr& pContext)
-		{
-			std::lock_guard<std::mutex> Guard(ms_PendingSerialsLock);
-			const auto& Data = pContext->Data();
-			const auto it = ms_PendingSerials.find(Data.m_Key);
-			if(it == ms_PendingSerials.end() || it->second != Data.m_Serial)
-				return false;
-
-			ms_PendingSerials.erase(it);
-			return true;
-		}
-
-		static void OnFinalize(const CSaveContextPtr& pContext, bool)
-		{
-			ConsumeLatest(pContext);
-		}
-
-		static void OnWrite(const CSaveContextPtr& pContext)
-		{
-			if(!IsLatest(pContext))
-				return;
-
-			const auto& Data = pContext->Data();
-			if(Data.m_Value <= 0)
-			{
-				Database->Execute<DB::REMOVE>([pContext](bool Updated) { OnFinalize(pContext, Updated); },
-					"tw_accounts_items", "WHERE ItemID = '{}' AND UserID = '{}'", Data.m_ItemID, Data.m_UserID);
-				return;
-			}
-
-			Database->Execute<DB::INSERT>([pContext](bool Updated) { OnFinalize(pContext, Updated); },
-				"tw_accounts_items",
-				"(ItemID, UserID, Value, Settings, Enchant, Durability, ExpiresAt, Data) VALUES ('{}', '{}', '{}', '{}', '{}', '{}', '{}', NULLIF(UNHEX('{}'), '')) "
-				"ON DUPLICATE KEY UPDATE Value = '{}', Settings = '{}', Enchant = '{}', Durability = '{}', ExpiresAt = '{}', Data = NULLIF(UNHEX('{}'), '')",
-				Data.m_ItemID, Data.m_UserID, Data.m_Value, Data.m_Settings, Data.m_Enchant, Data.m_Durability, Data.m_ExpiresAt, sqlstr::HexEncode(Data.m_Data),
-				Data.m_Value, Data.m_Settings, Data.m_Enchant, Data.m_Durability, Data.m_ExpiresAt, sqlstr::HexEncode(Data.m_Data));
-		}
-
 	public:
 		static void Start(CPlayer* pPlayer, int ItemID, int Value, int Settings, int Enchant, int Durability, time_t ExpiresAt, const std::string& ItemData)
 		{
 			const int UserID = pPlayer->Account()->GetID();
-			const uint64_t Key = MakeKey(UserID, ItemID);
-			const uint64_t Serial = NextSerial(Key);
-			auto pContext = DbAsync::MakeContext<CSavePayload>(pPlayer->GetCID(), CSavePayload {
-				UserID, ItemID, Value, Settings, Enchant, Durability > 0 ? Durability : 100, ExpiresAt, ItemData, Key, Serial,
-			});
-
-			OnWrite(pContext);
+			const int SavedDurability = Durability > 0 ? Durability : 100;
+			const std::string HexData = sqlstr::HexEncode(ItemData);
+			auto pContext = DbAsync::MakeContext(pPlayer->GetCID());
+			CAccountSaveCoordinator::Instance().Submit(UserID, "item:" + std::to_string(ItemID),
+				[UserID, ItemID, Value, Settings, Enchant, SavedDurability, ExpiresAt, HexData, pContext](CAccountSaveCoordinator::Done Done) {
+					auto Complete = [Done, pContext, UserID](bool Success, bool) {
+						Done(Success);
+						if(!Success)
+						{
+							dbg_msg("SQL Error", "Inventory save failed for account %d; session handover is blocked", UserID);
+							if(auto* pCurrent = pContext->GetPlayer(); pCurrent && pCurrent->IsAuthed() && pCurrent->Account()->GetID() == UserID)
+								pContext->Server()->Kick(pContext->GetClientID(), "Inventory save failed; contact an administrator");
+						}
+					};
+					if(Value <= 0)
+					{
+						Database->ExecuteWithStatus<DB::REMOVE>(Complete, "tw_accounts_items", "WHERE ItemID = '{}' AND UserID = '{}'", ItemID, UserID);
+						return;
+					}
+					Database->ExecuteWithStatus<DB::INSERT>(Complete, "tw_accounts_items",
+						"(ItemID, UserID, Value, Settings, Enchant, Durability, ExpiresAt, Data) VALUES ('{}', '{}', '{}', '{}', '{}', '{}', '{}', NULLIF(UNHEX('{}'), '')) "
+						"ON DUPLICATE KEY UPDATE Value = '{}', Settings = '{}', Enchant = '{}', Durability = '{}', ExpiresAt = '{}', Data = NULLIF(UNHEX('{}'), '')",
+						ItemID, UserID, Value, Settings, Enchant, SavedDurability, ExpiresAt, HexData,
+						Value, Settings, Enchant, SavedDurability, ExpiresAt, HexData);
+				});
 		}
 	};
 }

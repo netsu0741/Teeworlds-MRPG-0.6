@@ -28,6 +28,7 @@ class CAccountData
 
 	int m_ID {};
 	bool m_ReadyToPlay {};
+	bool m_LoadFailed {};
 	std::string m_Login{};
 	std::string m_LastLoginDate{};
 	std::string m_SessionToken{};
@@ -109,8 +110,10 @@ public:
 	/*
 	 * Group functions: initialize or uniques from function
 	 */
-	void Init(int ID, int ClientID, const char* pLogin, std::string Language, std::string LoginDate, ResultPtr pResult);
-	void InitProfessions();
+	bool Init(int ID, int ClientID, const char* pLogin, std::string Language, std::string LoginDate, ResultPtr pResult);
+	bool InitProfessions();
+	bool HasLoadFailed() const { return m_LoadFailed; }
+	void SetLoadFailed() { m_LoadFailed = true; }
 	void InitSharedEquipments(const std::string& EquippedSlots);
 	void SaveSharedEquipments();
 	void InitEquipmentPresets(const std::string& PresetsJson);
