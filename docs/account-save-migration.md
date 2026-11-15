@@ -55,11 +55,14 @@ query log and verified backups; it can contain sensitive account information.
 
 ### Reload and restart recovery
 
-During an orderly world reload, pending reservations are released after local
-tracked writes settle; if a save fails, the reservation remains for operator
-recovery. If the database is unavailable during teardown, release itself can
-fail and still require manual recovery. Callbacks associated with the old world
-are invalidated. In-flight SQL work is not made durable by a world reload.
+During an orderly world reload, login claims remain tracked from claim submission
+through account loading and activation. Cancellation waits for an in-flight claim
+or activation to complete before releasing or removing its token, and waits for
+local tracked saves. If a save fails, the reservation remains for operator
+recovery. Shutdown pumps SQL callbacks for up to ten seconds; a timeout, database
+outage, or failed cleanup can still leave a row requiring manual recovery.
+Callbacks associated with the old world are invalidated. In-flight SQL work is
+not made durable by a world reload.
 
 The server keeps process-local proof of the session tokens it activated. It
 refuses a local takeover or remote acknowledgement for an unknown owner after a
@@ -70,3 +73,10 @@ distinct server IDs and a single relay for all servers; this process-local check
 is not a substitute for a database fencing token and cannot guarantee safety
 under misconfiguration, split-brain deployments, or stale writers outside this
 protocol. A hard crash can still lose writes not committed to the database.
+
+The process-local owner-proof registry is limited to 8192 accounts. Confirmed
+row deletion removes proof; a periodic primary read also removes obsolete proof
+after the replacement session is active or the row is gone. If proof cannot be
+reclaimed and the registry fills, new sessions fail closed rather than evicting
+a potentially needed token. A reservation is not proof that replacement is
+final: the claimant may restore its previous owner after a lost acknowledgement.

@@ -262,6 +262,7 @@ public:
 
 	// Finishes the queued tasks and joins the workers. Tasks enqueued later are dropped.
 	void Stop();
+	bool Idle() const { return m_QueueSize.load() == 0 && m_ActiveTasks.load() == 0; }
 
 private:
 	struct CTask
@@ -284,6 +285,7 @@ private:
 	std::condition_variable m_cvCondition;
 	std::atomic<bool> m_bStop;
 	std::atomic<size_t> m_QueueSize { 0 };
+	std::atomic<size_t> m_ActiveTasks { 0 };
 	DbKind m_Kind;
 };
 
@@ -316,6 +318,7 @@ public:
 	// Async callbacks are applied only by the server tick, never by SQL workers.
 	static void PostCallback(std::function<void()> Callback);
 	static void ProcessCallbacks();
+	bool DrainAsync(int TimeoutMilliseconds);
 
 	// True if the table belongs to the local database (always false while
 	// sv_sql_local_database is not set).

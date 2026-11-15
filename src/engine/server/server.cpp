@@ -2328,6 +2328,11 @@ int CServer::Run(ILogger* pLogger)
 			Kick(i, "Server shutdown");
 	}
 
+	// Disconnect handlers can queue saves and cancellation callbacks which in
+	// turn enqueue session cleanup. Pump them while the game and SQL pool live.
+	if(!Database->DrainAsync(10000))
+		dbg_msg("SQL Worker", "Shutdown timed out waiting for account saves and session cleanup; operator recovery may be required");
+
 	delete m_pInputKeys;
 	m_pInputKeys = nullptr;
 	delete m_pLocalization;

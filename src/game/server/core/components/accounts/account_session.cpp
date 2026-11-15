@@ -99,9 +99,9 @@ namespace AccountSession
 			Prev.m_ServerID, Prev.m_ClientID, Prev.m_Token, Prev.m_Heartbeat, Claim.m_AccountID, Claim.m_Token);
 	}
 
-	void Remove(const SKey& Key)
+	void Remove(const SKey& Key, DoneCallback Done)
 	{
-		Database->Execute<DB::REMOVE>(TABLE, "WHERE AccountID = '{}' AND SessionToken = '{}'", Key.m_AccountID, Key.m_Token);
+		Database->Execute<DB::REMOVE>(std::move(Done), TABLE, "WHERE AccountID = '{}' AND SessionToken = '{}'", Key.m_AccountID, Key.m_Token);
 	}
 
 	void RefreshHeartbeats(const std::vector<SKey>& vKeys)

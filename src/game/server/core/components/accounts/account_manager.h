@@ -6,11 +6,15 @@
 #include <base/timeperiod.h>
 
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "account_data.h"
 #include "account_session.h"
+
+class CAccountClaimLifecycle;
+namespace DbAsync { class CContextBase; }
 
 class CAccountManager : public MmoComponent
 {
@@ -36,6 +40,9 @@ class CAccountManager : public MmoComponent
 
 public:
 	std::weak_ptr<void> Lifetime() const { return m_Lifetime; }
+	void TrackClaim(int ClientID, const std::shared_ptr<CAccountClaimLifecycle>& Claim);
+	void UntrackClaim(int ClientID, const std::shared_ptr<CAccountClaimLifecycle>& Claim);
+	void CancelClaim(int ClientID);
 	AccountCodeResult RegisterAccount(int ClientID, const char *pLogin, const char *pPassword);
 	AccountCodeResult RegisterAccountRaw(int ClientID, const char* pLogin, const char* pPassword);
 	AccountCodeResult RegisterGuestAccount(int ClientID, const char* pNickname);
@@ -44,7 +51,7 @@ public:
 
 	// Starts a login whose claim on the account has been written.
 	void BeginSessionTakeover(CPlayer* pPlayer, const AccountSession::SClaim& Claim, std::function<void()> OnReady);
-	bool CompleteLogin(int ClientID, const AccountSession::SClaim& Claim, bool RecommendPin);
+	bool CompleteLogin(int ClientID, const AccountSession::SClaim& Claim, bool RecommendPin, const std::shared_ptr<CAccountClaimLifecycle>& Lifecycle);
 	void LoadAccount(CPlayer *pPlayer, bool FirstInitilize = false, int64_t ClaimDeadline = 0);
 	void SetPinCode(int ClientID, const char* pCurrentPasswordOrPin, const char* pNewPin, bool IsChangingPin);
 	void ChangePassword(int ClientID, const char* pOldPassword, const char* pNewPassword, const char* pPinCode);
@@ -80,6 +87,8 @@ private:
 	{
 		int m_ClientID {};
 		AccountSession::SClaim m_Claim {};
+		std::shared_ptr<CAccountClaimLifecycle> m_Lifecycle;
+		std::shared_ptr<DbAsync::CContextBase> m_Context;
 		std::function<void()> m_OnReady {};
 		int m_EventID {}; // takeover request to the previous owner's server, 0 if none
 		bool m_RelayFailed {};
@@ -107,6 +116,8 @@ private:
 
 	void AddMenuProfessionUpgrades(CPlayer* pPlayer, CProfession* pProf) const;
 
+	struct STrackedClaim { CAccountManager* m_Owner; std::shared_ptr<CAccountClaimLifecycle> m_Claim; };
+	static std::map<int, STrackedClaim> ms_Claims;
 	std::shared_ptr<void> m_Lifetime = std::make_shared<int>(0);
 	std::vector<SPendingLogin> m_vPendingLogins {};
 	int64_t m_NextSessionCheck = 0;

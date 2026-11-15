@@ -68,7 +68,7 @@ namespace AccountSession
 	void Release(const SClaim& Claim, DoneCallback Done = {});
 
 	// Removes an active session on disconnect; matches only that token.
-	void Remove(const SKey& Key);
+	void Remove(const SKey& Key, DoneCallback Done = {});
 
 	// Refreshes the heartbeat of the given active sessions, in batches.
 	void RefreshHeartbeats(const std::vector<SKey>& vKeys);

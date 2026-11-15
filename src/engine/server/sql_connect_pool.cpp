@@ -432,6 +432,27 @@ void CConectionPool::ProcessCallbacks()
 	}
 }
 
+bool CConectionPool::DrainAsync(int TimeoutMilliseconds)
+{
+	const auto Deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(TimeoutMilliseconds);
+	for(;;)
+	{
+		ProcessCallbacks();
+		bool Idle = true;
+		for(const auto& Pool : m_apThreadPools)
+			if(Pool && !Pool->Idle())
+				Idle = false;
+		{
+			std::lock_guard<std::mutex> Lock(s_CallbackMutex);
+			if(Idle && s_Callbacks.empty())
+				return true;
+		}
+		if(std::chrono::steady_clock::now() >= Deadline)
+			return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+}
+
 CThreadPool::CThreadPool(DbKind Kind, int NumThreads) : m_bStop(false), m_Kind(Kind)
 {
 	for(int i = 0; i < NumThreads; ++i)
@@ -574,6 +595,7 @@ void CThreadPool::WorkerThread()
 			// Get the next task from the queue.
 			if(!m_qTasks.empty())
 			{
+				m_ActiveTasks.fetch_add(1);
 				task = std::move(m_qTasks.front());
 				m_qTasks.pop();
 				m_QueueSize.fetch_sub(1);
@@ -641,6 +663,7 @@ void CThreadPool::WorkerThread()
 				LogLostQuery("worker caught std::exception, task dropped", task.m_Type, task.m_Query);
 				FailTask(task);
 			}
+			m_ActiveTasks.fetch_sub(1);
 		}
 		// NOTE: an idle timeout must NOT close the worker connection.
 		// Reconnecting goes through the bridge to the remote primary

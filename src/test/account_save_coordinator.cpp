@@ -87,3 +87,73 @@ TEST(AccountSessionRegistry, RestartDoesNotTrustPreviousProcess)
 	EXPECT_FALSE(AfterRestart.KnowsFingerprint(42, "fingerprint"));
 	EXPECT_FALSE(AfterRestart.Knows(42, "owner-token"));
 }
+
+#include <game/server/core/tools/account_claim_lifecycle.h>
+
+TEST(AccountClaimLifecycle, DisconnectDuringClaimWaitsForWriteBeforeRelease)
+{
+	std::vector<bool> Cleanup;
+	CAccountClaimLifecycle Claim([&](bool Activated) { Cleanup.push_back(Activated); });
+	Claim.Cancel();
+	EXPECT_TRUE(Cleanup.empty());
+	EXPECT_FALSE(Claim.ClaimCompleted());
+	EXPECT_EQ(Cleanup, (std::vector<bool>{false}));
+	Claim.Cancel();
+	EXPECT_EQ(Cleanup.size(), 1u);
+}
+
+TEST(AccountClaimLifecycle, ReloadDuringAccountLoadReleasesOnce)
+{
+	std::vector<bool> Cleanup;
+	CAccountClaimLifecycle Claim([&](bool Activated) { Cleanup.push_back(Activated); });
+	ASSERT_TRUE(Claim.ClaimCompleted());
+	Claim.Cancel();
+	Claim.Cancel();
+	EXPECT_EQ(Cleanup, (std::vector<bool>{false}));
+	EXPECT_FALSE(Claim.BeginActivation());
+}
+
+TEST(AccountClaimLifecycle, DisconnectDuringActivationWaitsForCompletion)
+{
+	std::vector<bool> Cleanup;
+	CAccountClaimLifecycle Claim([&](bool Activated) { Cleanup.push_back(Activated); });
+	ASSERT_TRUE(Claim.ClaimCompleted());
+	ASSERT_TRUE(Claim.BeginActivation());
+	Claim.Cancel();
+	EXPECT_TRUE(Cleanup.empty());
+	EXPECT_FALSE(Claim.ActivationCompleted(true));
+	EXPECT_EQ(Cleanup, (std::vector<bool>{true}));
+}
+
+TEST(AccountClaimLifecycle, FailedActivationCleansPossiblyCommittedRow)
+{
+	std::vector<bool> Cleanup;
+	CAccountClaimLifecycle Claim([&](bool Activated) { Cleanup.push_back(Activated); });
+	ASSERT_TRUE(Claim.ClaimCompleted());
+	ASSERT_TRUE(Claim.BeginActivation());
+	EXPECT_FALSE(Claim.ActivationCompleted(false));
+	EXPECT_EQ(Cleanup, (std::vector<bool>{true}));
+}
+
+TEST(AccountSessionRegistry, RemovalIsTokenScopedAndReactivationReplacesProof)
+{
+	CAccountSessionRegistry Registry;
+	ASSERT_TRUE(Registry.Remember(7, "old", "old-hash"));
+	ASSERT_TRUE(Registry.Remember(7, "new", "new-hash"));
+	Registry.Forget(7, "old");
+	EXPECT_TRUE(Registry.Knows(7, "new"));
+	EXPECT_FALSE(Registry.KnowsFingerprint(7, "old-hash"));
+	Registry.Forget(7, "new");
+	EXPECT_TRUE(Registry.Snapshot().empty());
+}
+
+TEST(AccountSessionRegistry, CapacityFailsClosedWithoutEviction)
+{
+	CAccountSessionRegistry Registry;
+	for(size_t i = 0; i < CAccountSessionRegistry::MAX_ACCOUNTS; ++i)
+		ASSERT_TRUE(Registry.Remember((int)i, "token", "hash"));
+	EXPECT_FALSE(Registry.Remember((int)CAccountSessionRegistry::MAX_ACCOUNTS, "new", "new-hash"));
+	EXPECT_TRUE(Registry.Knows(0, "token"));
+	Registry.Forget(0, "token");
+	EXPECT_TRUE(Registry.Remember((int)CAccountSessionRegistry::MAX_ACCOUNTS, "new", "new-hash"));
+}

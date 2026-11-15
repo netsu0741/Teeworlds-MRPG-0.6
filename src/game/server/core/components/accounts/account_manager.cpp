@@ -16,6 +16,7 @@
 #include <game/server/core/components/worlds/world_data.h>
 #include <game/server/core/tools/db_async_context.h>
 #include <game/server/core/tools/account_save_coordinator.h>
+#include <game/server/core/tools/account_claim_lifecycle.h>
 #include <game/server/core/tools/account_session_registry.h>
 #include <base/hash.h>
 
@@ -118,6 +119,7 @@ class DbAuthorization
 		std::string m_LoginDate{};
 		std::string m_PinCode{};
 		AccountSession::SClaim m_Claim{};
+		std::shared_ptr<CAccountClaimLifecycle> m_ClaimLifecycle;
 		int m_Attempts{};
 	};
 	using CAuthorizationContextPtr = std::shared_ptr<DbAsync::CContext<CAuthorizationPayload>>;
@@ -229,12 +231,31 @@ class DbAuthorization
 			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: previous session is not known to this process. Contact an administrator.");
 			return;
 		}
+		const auto ClaimCopy = Claim;
+		auto Lifecycle = std::make_shared<CAccountClaimLifecycle>([ClaimCopy](bool ActivationAttempted) {
+			CAccountSaveCoordinator::Instance().WhenSettled(ClaimCopy.m_AccountID, [ClaimCopy, ActivationAttempted](bool Success) {
+				if(!Success)
+				{
+					dbg_msg("account", "Reservation for account %d retained after save failure", ClaimCopy.m_AccountID);
+					return;
+				}
+				if(ActivationAttempted)
+					AccountSession::Remove({ ClaimCopy.m_AccountID, ClaimCopy.m_Token });
+				else
+					AccountSession::Release(ClaimCopy);
+			});
+		});
+		pContext->Data().m_ClaimLifecycle = Lifecycle;
+		pContext->Data().m_pAccountManager->TrackClaim(pContext->GetClientID(), Lifecycle);
 		AccountSession::TryClaim(Claim, [pContext](bool Claimed) { OnClaimed(pContext, Claimed); });
 	}
 
 	static void OnClaimed(const CAuthorizationContextPtr& pContext, bool Claimed)
 	{
 		const auto& Claim = pContext->Data().m_Claim;
+		auto Lifecycle = pContext->Data().m_ClaimLifecycle;
+		if(!Lifecycle || !Lifecycle->ClaimCompleted())
+			return;
 		if(Claimed && GetPlayer(pContext) && time_get() < Claim.m_Deadline)
 		{
 			auto* pPlayer = GetPlayer(pContext);
@@ -244,6 +265,9 @@ class DbAuthorization
 
 		// Refused, lost or too late. Give back whatever the write did (a no-op unless
 		// our token is stored), then decide whether to try again.
+		Lifecycle->Finished();
+		if(!pContext->Data().m_ManagerLifetime.expired())
+			pContext->Data().m_pAccountManager->UntrackClaim(pContext->GetClientID(), Lifecycle);
 		ReleaseAfterLocalSaves(Claim, [pContext](bool) { OnReleased(pContext); });
 	}
 
@@ -282,13 +306,14 @@ class DbAuthorization
 		const auto& Claim = Data.m_Claim;
 		if(!pPlayer || time_get() >= Claim.m_Deadline)
 		{
-			AccountSession::Release(Claim);
+			Data.m_ClaimLifecycle->Cancel();
 			return;
 		}
 
 		if(!pRes->next())
 		{
-			AccountSession::Release(Claim);
+			Data.m_ClaimLifecycle->Cancel();
+			Data.m_pAccountManager->UntrackClaim(pContext->GetClientID(), Data.m_ClaimLifecycle);
 			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: account data could not be loaded.");
 			pContext->GS()->Chat(pContext->GetClientID(), "Please reconnect and try again.");
 			return;
@@ -299,29 +324,20 @@ class DbAuthorization
 
 		if(!pPlayer->Account()->Init(Claim.m_AccountID, pContext->GetClientID(), Data.m_Login.c_str(), Data.m_Language, Data.m_LoginDate, std::move(pRes)))
 		{
-			CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim](bool Success) {
-				if(Success)
-					AccountSession::Release(Claim);
-			});
+			Data.m_ClaimLifecycle->Cancel();
 			pContext->Server()->Kick(pContext->GetClientID(), "Account professions could not be loaded; please retry");
 			return;
 		}
 		pPlayer->Account()->SetSessionToken(Claim.m_Token);
 		if(time_get() >= Claim.m_Deadline)
 		{
-			CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim](bool Success) {
-				if(Success)
-					AccountSession::Release(Claim);
-			});
+			Data.m_ClaimLifecycle->Cancel();
 			pContext->Server()->Kick(pContext->GetClientID(), "Account session reservation expired");
 			return;
 		}
-		if(!Data.m_pAccountManager->CompleteLogin(pContext->GetClientID(), Claim, Data.m_PinCode.empty() && !pPlayer->IsGuestLogin()))
+		if(!Data.m_pAccountManager->CompleteLogin(pContext->GetClientID(), Claim, Data.m_PinCode.empty() && !pPlayer->IsGuestLogin(), Data.m_ClaimLifecycle))
 		{
-			CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim](bool Success) {
-				if(Success)
-					AccountSession::Release(Claim);
-			});
+			Data.m_ClaimLifecycle->Cancel();
 			pContext->Server()->Kick(pContext->GetClientID(), "Account session reservation expired");
 		}
 	}
@@ -554,22 +570,52 @@ namespace
 	}
 }
 
+std::map<int, CAccountManager::STrackedClaim> CAccountManager::ms_Claims;
+
+void CAccountManager::TrackClaim(int ClientID, const std::shared_ptr<CAccountClaimLifecycle>& Claim)
+{
+	CancelClaim(ClientID);
+	ms_Claims.insert_or_assign(ClientID, STrackedClaim{ this, Claim });
+}
+
+void CAccountManager::UntrackClaim(int ClientID, const std::shared_ptr<CAccountClaimLifecycle>& Claim)
+{
+	const auto It = ms_Claims.find(ClientID);
+	if(It != ms_Claims.end() && It->second.m_Claim == Claim)
+		ms_Claims.erase(It);
+}
+
+void CAccountManager::CancelClaim(int ClientID)
+{
+	const auto It = ms_Claims.find(ClientID);
+	if(It == ms_Claims.end())
+		return;
+	auto Claim = It->second.m_Claim;
+	ms_Claims.erase(It);
+	Claim->Cancel();
+}
+
 CAccountManager::~CAccountManager()
 {
 	m_Lifetime.reset();
-	for(const auto& Pending : m_vPendingLogins)
-		ReleaseAfterLocalSaves(Pending.m_Claim);
+	for(auto It = ms_Claims.begin(); It != ms_Claims.end();)
+	{
+		if(It->second.m_Owner != this)
+		{
+			++It;
+			continue;
+		}
+		auto Claim = It->second.m_Claim;
+		It = ms_Claims.erase(It);
+		Claim->Cancel();
+	}
 	mystd::freeContainer(CAccountData::ms_aData, CAccountSharedData::ms_aPlayerSharedData);
 }
 
 void CAccountManager::OnClientReset(int ClientID)
 {
-	// A login that never completed gives its reservation back.
-	for(const auto& Pending : m_vPendingLogins)
-	{
-		if(Pending.m_ClientID == ClientID)
-			ReleaseAfterLocalSaves(Pending.m_Claim);
-	}
+	// Cancel even after takeover completes and the account-data query is in flight.
+	CancelClaim(ClientID);
 	std::erase_if(m_vPendingLogins, [ClientID](const SPendingLogin& Pending) { return Pending.m_ClientID == ClientID; });
 
 	int AccountID = 0;
@@ -587,7 +633,10 @@ void CAccountManager::OnClientReset(int ClientID)
 	{
 		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [AccountID, SessionToken](bool Success) {
 			if(Success)
-				AccountSession::Remove({ AccountID, SessionToken });
+				AccountSession::Remove({ AccountID, SessionToken }, [AccountID, SessionToken](bool Removed) {
+					if(Removed)
+						CAccountSessionRegistry::Instance().Forget(AccountID, SessionToken);
+				});
 			else
 				dbg_msg("account", "Session for account %d retained because a save failed", AccountID);
 		});
@@ -609,6 +658,11 @@ void CAccountManager::BeginSessionTakeover(CPlayer* pPlayer, const AccountSessio
 	SPendingLogin Pending {};
 	Pending.m_ClientID = pPlayer->GetCID();
 	Pending.m_Claim = Claim;
+	const auto Tracked = ms_Claims.find(Pending.m_ClientID);
+	if(Tracked == ms_Claims.end())
+		return;
+	Pending.m_Lifecycle = Tracked->second.m_Claim;
+	Pending.m_Context = DbAsync::MakeContext(Pending.m_ClientID);
 	Pending.m_OnReady = std::move(OnReady);
 	Pending.m_StartTime = time_get();
 	if(NeedsRemoteTakeover(Claim))
@@ -709,8 +763,11 @@ void CAccountManager::VerifySessions(std::vector<SLocalSession> vSessions, std::
 
 void CAccountManager::FailPendingLogin(const SPendingLogin& Pending)
 {
-	ReleaseAfterLocalSaves(Pending.m_Claim);
+	UntrackClaim(Pending.m_ClientID, Pending.m_Lifecycle);
+	Pending.m_Lifecycle->Cancel();
 
+	if(!Pending.m_Context || !Pending.m_Context->GetPlayer())
+		return;
 	auto* pGS = static_cast<CGS*>(Instance::GameServerPlayer(Pending.m_ClientID));
 	if(!pGS)
 		return;
@@ -726,7 +783,7 @@ void CAccountManager::FailPendingLogin(const SPendingLogin& Pending)
 	pGS->Server()->Kick(Pending.m_ClientID, "Session takeover was not confirmed");
 }
 
-bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& Claim, bool RecommendPin)
+bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& Claim, bool RecommendPin, const std::shared_ptr<CAccountClaimLifecycle>& Lifecycle)
 {
 	auto* pGS = static_cast<CGS*>(Instance::GameServerPlayer(ClientID));
 	auto* pPlayer = pGS ? pGS->GetPlayer(ClientID, false) : nullptr;
@@ -762,13 +819,25 @@ bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& 
 
 	// The reservation stays until the row is active, so no other login can take
 	// over in the meantime. A failed write ends this session.
+	if(!Lifecycle->BeginActivation())
+		return false;
 	auto pContext = DbAsync::MakeContext(ClientID);
-	AccountSession::Activate(Claim, [pContext, AccountID = Claim.m_AccountID, Token = Claim.m_Token](bool Success)
+	AccountSession::Activate(Claim, [this, Lifetime = Lifetime(), Lifecycle, pContext, AccountID = Claim.m_AccountID, Token = Claim.m_Token](bool Success)
 	{
-		if(Success)
-			CAccountSessionRegistry::Instance().Remember(AccountID, Token, SessionFingerprint(Token));
+		const bool Active = Lifecycle->ActivationCompleted(Success);
+		if(!Lifetime.expired())
+			UntrackClaim(pContext->GetClientID(), Lifecycle);
+		const bool Registered = Active && CAccountSessionRegistry::Instance().Remember(AccountID, Token, SessionFingerprint(Token));
 		auto* pCurrentPlayer = pContext->GetPlayer();
-		if(!Success && pCurrentPlayer && pCurrentPlayer->Account()->GetSessionToken() == Token)
+		if(Active && !Registered)
+		{
+			dbg_msg("account", "Cannot retain ownership proof for account %d: registry is full", AccountID);
+			if(!pCurrentPlayer)
+				CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [AccountID, Token](bool Settled) {
+					if(Settled) AccountSession::Remove({ AccountID, Token });
+				});
+		}
+		if((!Success || (Active && !Registered)) && pCurrentPlayer && pCurrentPlayer->Account()->GetSessionToken() == Token)
 			pContext->Server()->Kick(pContext->GetClientID(), "Account session activation failed");
 	});
 	g_EventListenerManager.Notify<IEventListener::PlayerLogin>(pPlayer, pPlayer->Account());
@@ -777,9 +846,7 @@ bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& 
 
 CAccountManager::EPendingState CAccountManager::EvaluatePendingLogin(const SPendingLogin& Pending, int64_t Now) const
 {
-	auto* pGS = static_cast<CGS*>(Instance::GameServerPlayer(Pending.m_ClientID));
-	auto* pPlayer = pGS ? pGS->GetPlayer(Pending.m_ClientID, false) : nullptr;
-	if(!pPlayer)
+	if(!Pending.m_Context || !Pending.m_Context->GetPlayer())
 		return EPendingState::Abandoned;
 
 	if(Now >= Pending.m_Claim.m_Deadline)
@@ -822,7 +889,8 @@ void CAccountManager::ProcessPendingLogins()
 			break;
 		case EPendingState::Abandoned:
 			// The player is gone without OnClientReset: give the reservation back.
-			ReleaseAfterLocalSaves(It->m_Claim);
+			UntrackClaim(It->m_ClientID, It->m_Lifecycle);
+			It->m_Lifecycle->Cancel();
 			break;
 		}
 		It = m_vPendingLogins.erase(It);
@@ -873,8 +941,9 @@ void CAccountManager::OnSyncEvent(std::string EventName, const CServerSync::SReq
 			dbg_msg("account", "Cannot confirm takeover for account %d: unknown or still local owner", AccountID);
 			return;
 		}
-		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [this, Lifetime, AccountID, AckTarget, WorldID, EventID](bool Success) {
-			if(!Lifetime.expired() && Success && CollectLocalSessions(AccountID).empty())
+		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [this, Lifetime, AccountID, PreviousFingerprint, AckTarget, WorldID, EventID](bool Success) {
+			if(!Lifetime.expired() && Success && CollectLocalSessions(AccountID).empty() &&
+				CAccountSessionRegistry::Instance().KnowsFingerprint(AccountID, PreviousFingerprint))
 				Sync->Push(AckTarget.c_str(), WorldID, EventID);
 		});
 	});
@@ -897,6 +966,28 @@ void CAccountManager::OnTick()
 	if(Now < m_NextSessionCheck)
 		return;
 	m_NextSessionCheck = Now + RefreshSeconds * time_freq();
+
+	// Reclaim old proofs only when the authoritative row can no longer be
+	// restored to that token. A reservation (Heartbeat=0) is not sufficient:
+	// the claimant could still roll it back after an ACK is lost.
+	static size_t s_ProofCursor = 0;
+	const auto Proofs = CAccountSessionRegistry::Instance().Snapshot();
+	if(!Proofs.empty())
+	{
+		const size_t Count = std::min<size_t>(32, Proofs.size());
+		for(size_t i = 0; i < Count; ++i)
+		{
+			const auto [AccountID, Token] = Proofs[(s_ProofCursor + i) % Proofs.size()];
+			AccountSession::ReadRecord(AccountID, [this, Lifetime = Lifetime(), AccountID, Token](std::optional<AccountSession::SRecord> Row) {
+				if(Lifetime.expired() || !Row || !CollectLocalSessions(AccountID).empty() ||
+					CAccountSaveCoordinator::Instance().Pending(AccountID) || CAccountSaveCoordinator::Instance().Failed(AccountID))
+					return;
+				if(!Row->m_Exists || (Row->m_Heartbeat != 0 && Row->m_Token != Token))
+					CAccountSessionRegistry::Instance().Forget(AccountID, Token);
+			});
+		}
+		s_ProofCursor = (s_ProofCursor + Count) % Proofs.size();
+	}
 
 	const auto vSessions = CollectLocalSessions();
 	std::vector<AccountSession::SKey> vKeys;
