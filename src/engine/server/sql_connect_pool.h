@@ -275,6 +275,7 @@ private:
 
 	void EnqueueTask(CTask&& task);
 	void EnqueueRetry(CTask&& task, const char* reason, int maxRetries);
+	void FailTask(CTask& task);
 	void WorkerThread();
 
 	std::vector<std::thread> m_vWorkers;

@@ -52,3 +52,21 @@ Existing data in the primary may already have been overwritten; retrying
 failed SQL or clearing a session does not recover it. A sudden process or host
 crash can still lose writes that were not durably committed. Consult the failed
 query log and verified backups; it can contain sensitive account information.
+
+### Reload and restart recovery
+
+During an orderly world reload, pending reservations are released after local
+tracked writes settle; if a save fails, the reservation remains for operator
+recovery. If the database is unavailable during teardown, release itself can
+fail and still require manual recovery. Callbacks associated with the old world
+are invalidated. In-flight SQL work is not made durable by a world reload.
+
+The server keeps process-local proof of the session tokens it activated. It
+refuses a local takeover or remote acknowledgement for an unknown owner after a
+process restart, even if its server ID matches. This is intentional: a restart
+forgets pending and failed writes. Investigate the old process and recover the
+account's data before manually clearing or repairing its session row. Configure
+distinct server IDs and a single relay for all servers; this process-local check
+is not a substitute for a database fencing token and cannot guarantee safety
+under misconfiguration, split-brain deployments, or stale writers outside this
+protocol. A hard crash can still lose writes not committed to the database.

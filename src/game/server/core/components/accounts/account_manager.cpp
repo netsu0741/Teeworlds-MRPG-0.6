@@ -16,6 +16,8 @@
 #include <game/server/core/components/worlds/world_data.h>
 #include <game/server/core/tools/db_async_context.h>
 #include <game/server/core/tools/account_save_coordinator.h>
+#include <game/server/core/tools/account_session_registry.h>
+#include <base/hash.h>
 
 #include <teeother/components/localization.h>
 
@@ -34,6 +36,16 @@ namespace
 	constexpr const char* ACCOUNT_SESSION_TAKEOVER_REASON = "Account session was taken over";
 	constexpr int ACCOUNT_SESSION_TAKEOVER_TIMEOUT_SECONDS = 10;
 	constexpr int ACCOUNT_SESSION_CLAIM_ATTEMPTS = 3;
+	constexpr const char* TAKEOVER_EVENT_PREFIX = "account_takeover:";
+
+	// The relay carries a fingerprint, not the session token itself. 128 bits
+	// fit the event-name limit and identify the precise owner being displaced.
+	std::string SessionFingerprint(const std::string& Token)
+	{
+		char aHash[SHA256_MAXSTRSIZE];
+		sha256_str(sha256(Token.data(), Token.size()), aHash, sizeof(aHash));
+		return std::string(aHash, 32);
+	}
 
 	// The primary can be remote (SQL bridge over the WAN), so a login waits seconds.
 	constexpr int64_t AUTH_PROGRESS_FIRST_SECONDS = 5;
@@ -89,11 +101,17 @@ namespace
 	}
 }
 
+namespace
+{
+	void ReleaseAfterLocalSaves(const AccountSession::SClaim& Claim, AccountSession::DoneCallback Done = {});
+}
+
 class DbAuthorization
 {
 	struct CAuthorizationPayload
 	{
 		CAccountManager* m_pAccountManager{};
+		std::weak_ptr<void> m_ManagerLifetime;
 		std::string m_Login{};
 		std::string m_Password{};
 		std::string m_Language{};
@@ -107,7 +125,7 @@ class DbAuthorization
 	static CPlayer* GetPlayer(const CAuthorizationContextPtr& pContext)
 	{
 		auto* pPlayer = pContext->GetPlayer(false);
-		if(!pPlayer || pPlayer->GetSharedData().m_pAuthorizationAttempt.lock().get() != pContext.get()
+		if(pContext->Data().m_ManagerLifetime.expired() || !pPlayer || pPlayer->GetSharedData().m_pAuthorizationAttempt.lock().get() != pContext.get()
 			|| pPlayer->Account()->GetID() > 0)
 			return nullptr;
 		return pPlayer;
@@ -205,6 +223,12 @@ class DbAuthorization
 			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: previous session has no verifiable server ID. Contact an administrator.");
 			return;
 		}
+		if(Claim.m_Previous.m_Exists && Claim.m_Previous.m_ServerID == g_Config.m_SvSyncServerID &&
+			!CAccountSessionRegistry::Instance().Knows(Claim.m_AccountID, Claim.m_Previous.m_Token))
+		{
+			pContext->GS()->Chat(pContext->GetClientID(), "Login failed: previous session is not known to this process. Contact an administrator.");
+			return;
+		}
 		AccountSession::TryClaim(Claim, [pContext](bool Claimed) { OnClaimed(pContext, Claimed); });
 	}
 
@@ -220,7 +244,7 @@ class DbAuthorization
 
 		// Refused, lost or too late. Give back whatever the write did (a no-op unless
 		// our token is stored), then decide whether to try again.
-		AccountSession::Release(Claim, [pContext](bool) { OnReleased(pContext); });
+		ReleaseAfterLocalSaves(Claim, [pContext](bool) { OnReleased(pContext); });
 	}
 
 	static void OnReleased(const CAuthorizationContextPtr& pContext)
@@ -312,6 +336,7 @@ public:
 
 		CAuthorizationPayload Payload {};
 		Payload.m_pAccountManager = pMgr;
+		Payload.m_ManagerLifetime = pMgr->Lifetime();
 		Payload.m_Login = Login;
 		Payload.m_Password = Pass;
 		Payload.m_Claim.m_ClientID = ClientID;
@@ -336,6 +361,7 @@ class DbRegistration
 	struct CRegistrationPayload
 	{
 		CAccountManager* m_pAccountManager{};
+		std::weak_ptr<void> m_ManagerLifetime;
 		int m_InitID{};
 		std::string m_Login{};
 		std::string m_Password{};
@@ -464,7 +490,8 @@ class DbRegistration
 		const auto& Data = pContext->Data();
 		dbg_msg("Account", "Registration of '%s' stored the account (client %d, account id %d).", Data.m_Nickname.c_str(), pContext->GetClientID(), Data.m_InitID);
 		pContext->Server()->UpdateAccountBase(Data.m_InitID, Data.m_Nickname, g_Config.m_SvMinRating);
-		DbAuthorization::StartAuthorization(Data.m_pAccountManager, pContext->GetClientID(), Data.m_Login, Data.m_Password, Data.m_Nickname);
+		if(!Data.m_ManagerLifetime.expired())
+			DbAuthorization::StartAuthorization(Data.m_pAccountManager, pContext->GetClientID(), Data.m_Login, Data.m_Password, Data.m_Nickname);
 	}
 
 public:
@@ -479,7 +506,7 @@ public:
 		const auto AccountPasswordHash = CAccountManager::HashPassword(Pass, aSalt);
 		const std::string Language = pPlayer->GetLanguage();
 		auto pContext = DbAsync::MakeContext<DbRegistration::CRegistrationPayload>(ClientID,
-			DbRegistration::CRegistrationPayload { pMgr, 0, Login, Pass, AccountPasswordHash, aSalt, Nick, RegisterIP, Language });
+			DbRegistration::CRegistrationPayload { pMgr, pMgr->Lifetime(), 0, Login, Pass, AccountPasswordHash, aSalt, Nick, RegisterIP, Language });
 		StartAuthProgress(pPlayer->GetSharedData(), pContext, true);
 
 		// The nickname must be free on the primary: a lagging replica hides taken ones.
@@ -510,13 +537,38 @@ void CAccountManager::OnPlayerLogin(CPlayer* pPlayer)
 	}
 }
 
+namespace
+{
+	void ReleaseAfterLocalSaves(const AccountSession::SClaim& Claim, AccountSession::DoneCallback Done)
+	{
+		CAccountSaveCoordinator::Instance().WhenSettled(Claim.m_AccountID, [Claim, Done = std::move(Done)](bool Success) {
+			if(Success)
+				AccountSession::Release(Claim, Done);
+			else
+			{
+				dbg_msg("account", "Reservation for account %d retained after save failure", Claim.m_AccountID);
+				if(Done)
+					Done(false);
+			}
+		});
+	}
+}
+
+CAccountManager::~CAccountManager()
+{
+	m_Lifetime.reset();
+	for(const auto& Pending : m_vPendingLogins)
+		ReleaseAfterLocalSaves(Pending.m_Claim);
+	mystd::freeContainer(CAccountData::ms_aData, CAccountSharedData::ms_aPlayerSharedData);
+}
+
 void CAccountManager::OnClientReset(int ClientID)
 {
 	// A login that never completed gives its reservation back.
 	for(const auto& Pending : m_vPendingLogins)
 	{
 		if(Pending.m_ClientID == ClientID)
-			AccountSession::Release(Pending.m_Claim);
+			ReleaseAfterLocalSaves(Pending.m_Claim);
 	}
 	std::erase_if(m_vPendingLogins, [ClientID](const SPendingLogin& Pending) { return Pending.m_ClientID == ClientID; });
 
@@ -562,7 +614,8 @@ void CAccountManager::BeginSessionTakeover(CPlayer* pPlayer, const AccountSessio
 	if(NeedsRemoteTakeover(Claim))
 	{
 		// The other server ends its session and answers with an ack carrying this event ID.
-		Pending.m_EventID = Sync->Push(syncevents::ACCOUNT_SESSION_TAKEOVER, GS()->GetWorldID(), Claim.m_AccountID);
+		const std::string Event = std::string(TAKEOVER_EVENT_PREFIX) + SessionFingerprint(Claim.m_Previous.m_Token);
+		Pending.m_EventID = Sync->Push(Event.c_str(), GS()->GetWorldID(), Claim.m_AccountID);
 		Pending.m_RelayFailed = Pending.m_EventID <= 0;
 	}
 	m_vPendingLogins.push_back(Pending);
@@ -604,11 +657,21 @@ void CAccountManager::KickLocalSession(const SLocalSession& Session)
 
 	auto* pGS = static_cast<CGS*>(Instance::GameServerPlayer(Session.m_ClientID));
 	if(!pGS || !pGS->GetPlayer(Session.m_ClientID, false))
+	{
+		dbg_msg("account", "Cannot disconnect account %d: local session has no player; takeover remains blocked", Session.m_Key.m_AccountID);
 		return;
+	}
 
 	// Stop the old session from acting during its final disconnect tick.
+	const bool WasReady = It->second.IsReadyToPlay();
 	It->second.SetReadyToPlay(false);
 	pGS->Server()->Kick(Session.m_ClientID, ACCOUNT_SESSION_TAKEOVER_REASON);
+	const auto Remaining = CAccountData::ms_aData.find(Session.m_ClientID);
+	if(Remaining != CAccountData::ms_aData.end() && Remaining->second.GetID() == Session.m_Key.m_AccountID && Remaining->second.GetSessionToken() == Session.m_Key.m_Token)
+	{
+		Remaining->second.SetReadyToPlay(WasReady);
+		dbg_msg("account", "Could not disconnect account %d for takeover", Session.m_Key.m_AccountID);
+	}
 }
 
 void CAccountManager::KickOtherLocalSessions(int AccountID, const std::string& Token)
@@ -626,14 +689,16 @@ void CAccountManager::VerifySessions(std::vector<SLocalSession> vSessions, std::
 	for(const auto& Session : vSessions)
 		vAccountIDs.push_back(Session.m_Key.m_AccountID);
 
-	AccountSession::FetchTokens(vAccountIDs, [this, vSessions = std::move(vSessions), OnVerified](const std::vector<AccountSession::SKey>& vRows)
+	AccountSession::FetchTokens(vAccountIDs, [this, Lifetime = Lifetime(), vSessions = std::move(vSessions), OnVerified](const std::vector<AccountSession::SKey>& vRows)
 	{
+		if(Lifetime.expired())
+			return;
 		// The row is the truth: a session whose token is no longer stored there was taken over.
 		for(const auto& Session : vSessions)
 		{
 			const auto It = std::find_if(vRows.begin(), vRows.end(),
 				[&Session](const AccountSession::SKey& Row) { return Row.m_AccountID == Session.m_Key.m_AccountID; });
-			if(It != vRows.end() && !It->m_Token.empty() && It->m_Token != Session.m_Key.m_Token)
+			if(It == vRows.end() || It->m_Token.empty() || It->m_Token != Session.m_Key.m_Token)
 				KickLocalSession(Session);
 		}
 
@@ -644,7 +709,7 @@ void CAccountManager::VerifySessions(std::vector<SLocalSession> vSessions, std::
 
 void CAccountManager::FailPendingLogin(const SPendingLogin& Pending)
 {
-	AccountSession::Release(Pending.m_Claim);
+	ReleaseAfterLocalSaves(Pending.m_Claim);
 
 	auto* pGS = static_cast<CGS*>(Instance::GameServerPlayer(Pending.m_ClientID));
 	if(!pGS)
@@ -698,8 +763,10 @@ bool CAccountManager::CompleteLogin(int ClientID, const AccountSession::SClaim& 
 	// The reservation stays until the row is active, so no other login can take
 	// over in the meantime. A failed write ends this session.
 	auto pContext = DbAsync::MakeContext(ClientID);
-	AccountSession::Activate(Claim, [pContext, Token = Claim.m_Token](bool Success)
+	AccountSession::Activate(Claim, [pContext, AccountID = Claim.m_AccountID, Token = Claim.m_Token](bool Success)
 	{
+		if(Success)
+			CAccountSessionRegistry::Instance().Remember(AccountID, Token, SessionFingerprint(Token));
 		auto* pCurrentPlayer = pContext->GetPlayer();
 		if(!Success && pCurrentPlayer && pCurrentPlayer->Account()->GetSessionToken() == Token)
 			pContext->Server()->Kick(pContext->GetClientID(), "Account session activation failed");
@@ -755,7 +822,7 @@ void CAccountManager::ProcessPendingLogins()
 			break;
 		case EPendingState::Abandoned:
 			// The player is gone without OnClientReset: give the reservation back.
-			AccountSession::Release(It->m_Claim);
+			ReleaseAfterLocalSaves(It->m_Claim);
 			break;
 		}
 		It = m_vPendingLogins.erase(It);
@@ -788,19 +855,26 @@ void CAccountManager::OnSyncEvent(std::string EventName, const CServerSync::SReq
 		return;
 	}
 
-	if(EventName != syncevents::ACCOUNT_SESSION_TAKEOVER || Req.Value <= 0)
+	const std::string Prefix = TAKEOVER_EVENT_PREFIX;
+	if(!EventName.starts_with(Prefix) || EventName.size() != Prefix.size() + 32 || Req.Value <= 0)
 		return;
+	const std::string PreviousFingerprint = EventName.substr(Prefix.size());
 
 	// Another server claimed this account: end the local sessions that lost the row,
 	// then acknowledge. The ack is sent only if the check succeeded.
 	const std::string AckTarget = std::string(syncevents::ACCOUNT_SESSION_TAKEOVER_ACK_PREFIX) + std::to_string(Req.ServerID);
-	VerifySessions(CollectLocalSessions(Req.Value), [this, AccountID = Req.Value, AckTarget, WorldID = Req.WorldID, EventID = Req.ID]()
+	VerifySessions(CollectLocalSessions(Req.Value), [this, Lifetime = Lifetime(), AccountID = Req.Value, PreviousFingerprint, AckTarget, WorldID = Req.WorldID, EventID = Req.ID]()
 	{
-		// Kick can be refused. Never acknowledge while any local owner remains.
-		if(!CollectLocalSessions(AccountID).empty())
+		if(Lifetime.expired())
 			return;
-		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [this, AccountID, AckTarget, WorldID, EventID](bool Success) {
-			if(Success && CollectLocalSessions(AccountID).empty())
+		// A restarted process cannot prove that its predecessor saved successfully.
+		if(!CAccountSessionRegistry::Instance().KnowsFingerprint(AccountID, PreviousFingerprint) || !CollectLocalSessions(AccountID).empty())
+		{
+			dbg_msg("account", "Cannot confirm takeover for account %d: unknown or still local owner", AccountID);
+			return;
+		}
+		CAccountSaveCoordinator::Instance().WhenSettled(AccountID, [this, Lifetime, AccountID, AckTarget, WorldID, EventID](bool Success) {
+			if(!Lifetime.expired() && Success && CollectLocalSessions(AccountID).empty())
 				Sync->Push(AckTarget.c_str(), WorldID, EventID);
 		});
 	});

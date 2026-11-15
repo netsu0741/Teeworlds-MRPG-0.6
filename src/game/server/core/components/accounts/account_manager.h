@@ -14,11 +14,7 @@
 
 class CAccountManager : public MmoComponent
 {
-	~CAccountManager() override
-	{
-		// free data
-		mystd::freeContainer(CAccountData::ms_aData, CAccountSharedData::ms_aPlayerSharedData);
-	}
+	~CAccountManager() override;
 
 	void OnPlayerLogin(CPlayer* pPlayer) override;
 	void OnTick() override;
@@ -39,6 +35,7 @@ class CAccountManager : public MmoComponent
 	};
 
 public:
+	std::weak_ptr<void> Lifetime() const { return m_Lifetime; }
 	AccountCodeResult RegisterAccount(int ClientID, const char *pLogin, const char *pPassword);
 	AccountCodeResult RegisterAccountRaw(int ClientID, const char* pLogin, const char* pPassword);
 	AccountCodeResult RegisterGuestAccount(int ClientID, const char* pNickname);
@@ -110,6 +107,7 @@ private:
 
 	void AddMenuProfessionUpgrades(CPlayer* pPlayer, CProfession* pProf) const;
 
+	std::shared_ptr<void> m_Lifetime = std::make_shared<int>(0);
 	std::vector<SPendingLogin> m_vPendingLogins {};
 	int64_t m_NextSessionCheck = 0;
 };

@@ -498,7 +498,11 @@ void CThreadPool::EnqueueTask(CTask&& task)
 		}
 
 		if(m_bStop.load())
+		{
+			lock.unlock();
+			FailTask(task);
 			return;
+		}
 
 		m_qTasks.emplace(std::move(task));
 		queuedSize = m_QueueSize.fetch_add(1) + 1;
@@ -513,12 +517,27 @@ void CThreadPool::EnqueueTask(CTask&& task)
 	m_cvCondition.notify_one();
 }
 
+void CThreadPool::FailTask(CTask& task)
+{
+	// All queued query tasks handle a null connection by reporting a terminal
+	// failure when the retry count is exhausted. Do not silently strand callers.
+	try
+	{
+		task.m_Task(nullptr, MaxRetriesForType(task.m_Type));
+	}
+	catch(const std::exception& e)
+	{
+		dbg_msg("SQL Worker", "Unable to report task failure: %s", e.what());
+	}
+}
+
 void CThreadPool::EnqueueRetry(CTask&& task, const char* reason, int maxRetries)
 {
 	if(task.m_RetryCount >= maxRetries)
 	{
 		dbg_msg("SQL Worker", "%s. Dropping task after %d retries. Query: %s", reason, maxRetries, task.m_Query.c_str());
 		LogLostQuery(reason, task.m_Type, task.m_Query);
+		FailTask(task);
 		return;
 	}
 
@@ -612,6 +631,7 @@ void CThreadPool::WorkerThread()
 				else
 				{
 					dbg_msg("SQL Error", "Worker caught SQLException during task: %s. Connection will be reset.", e.what());
+					FailTask(task);
 				}
 				pConnection = nullptr;
 			}
@@ -619,6 +639,7 @@ void CThreadPool::WorkerThread()
 			{
 				dbg_msg("Error", "Worker caught std::exception during task: %s", e.what());
 				LogLostQuery("worker caught std::exception, task dropped", task.m_Type, task.m_Query);
+				FailTask(task);
 			}
 		}
 		// NOTE: an idle timeout must NOT close the worker connection.

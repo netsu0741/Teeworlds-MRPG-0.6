@@ -64,3 +64,26 @@ TEST(AccountSaveCoordinator, SynchronousCompletionDoesNotLeavePendingEntry)
 	EXPECT_FALSE(Queue.Pending(1));
 	Queue.WhenSettled(1, [](bool Success) { EXPECT_TRUE(Success); });
 }
+
+#include <game/server/core/tools/account_session_registry.h>
+
+TEST(AccountSessionRegistry, RequiresProofOfExactOwnerForLocalTakeover)
+{
+	CAccountSessionRegistry Registry;
+	EXPECT_FALSE(Registry.KnowsFingerprint(42, "fingerprint"));
+	Registry.Remember(42, "owner-token", "fingerprint");
+	EXPECT_TRUE(Registry.KnowsFingerprint(42, "fingerprint"));
+	EXPECT_FALSE(Registry.KnowsFingerprint(42, "different"));
+	EXPECT_TRUE(Registry.Knows(42, "owner-token"));
+	EXPECT_FALSE(Registry.Knows(42, "different-token"));
+	EXPECT_FALSE(Registry.Knows(43, "owner-token"));
+}
+
+TEST(AccountSessionRegistry, RestartDoesNotTrustPreviousProcess)
+{
+	CAccountSessionRegistry BeforeRestart;
+	BeforeRestart.Remember(42, "owner-token", "fingerprint");
+	CAccountSessionRegistry AfterRestart;
+	EXPECT_FALSE(AfterRestart.KnowsFingerprint(42, "fingerprint"));
+	EXPECT_FALSE(AfterRestart.Knows(42, "owner-token"));
+}
