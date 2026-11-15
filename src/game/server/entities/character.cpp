@@ -722,11 +722,61 @@ void CCharacter::ResetInput()
 	m_LatestPrevInput = m_LatestInput = m_Input;
 }
 
+namespace
+{
+	constexpr int MAGNET_SNAP_GROUP = 18001;
+}
+
+bool CCharacter::TryReserveMagnetPickup(CMagnetReserve::EResource Resource)
+{
+	if(!m_Alive || !m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed())
+		return false;
+	auto* pMagnet = m_pPlayer->GetItem(itMagnetItems);
+	if(!pMagnet->IsEquipped() || !m_MagnetReserve.Reserve(Resource, pMagnet->GetEnchant()))
+		return false;
+	if(!FindSnappingGroupIds(MAGNET_SNAP_GROUP))
+		AddSnappingGroupIds(MAGNET_SNAP_GROUP, 8);
+	return true;
+}
+
+void CCharacter::RefillFromMagnet()
+{
+	if(!m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed() || !m_pPlayer->GetItem(itMagnetItems)->IsEquipped())
+		return;
+	m_Health += m_MagnetReserve.Consume(CMagnetReserve::EResource::Health, m_pPlayer->GetMaxHealth() - m_Health);
+	m_Mana += m_MagnetReserve.Consume(CMagnetReserve::EResource::Mana, m_pPlayer->GetMaxMana() - m_Mana);
+}
+
+void CCharacter::SnapMagnet(int SnappingClient)
+{
+	if(!m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed() || !m_pPlayer->GetItem(itMagnetItems)->IsEquipped())
+		return;
+	const auto* pIDs = FindSnappingGroupIds(MAGNET_SNAP_GROUP);
+	if(!pIDs)
+		return;
+	int Health = m_MagnetReserve.Orbits(CMagnetReserve::EResource::Health);
+	int Mana = m_MagnetReserve.Orbits(CMagnetReserve::EResource::Mana);
+	const int Count = Health + Mana;
+	if(!Count)
+		return;
+	bool NextHealth = true;
+	for(int i = 0; i < Count; ++i)
+	{
+		const bool UseHealth = Health > 0 && (Mana == 0 || NextHealth);
+		if(UseHealth) --Health; else --Mana;
+		NextHealth = !UseHealth;
+		const float Angle = 2.0f * pi * i / Count + 2.0f * pi * Server()->Tick() / (Server()->TickSpeed() * 4.0f);
+		const vec2 Pos = m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * 58.0f;
+		GS()->SnapPickup(SnappingClient, (*pIDs)[i], Pos, UseHealth ? POWERUP_HEALTH : POWERUP_ARMOR);
+	}
+}
+
 void CCharacter::Tick()
 {
 	if(!m_Alive)
 		return;
 
+	RefillFromMagnet();
 	// check world access
 	if(!CanAccessWorld())
 		return;
@@ -1184,6 +1234,7 @@ bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon, int
 
 	Damage += CritDamage;
 	m_Health -= Damage;
+	RefillFromMagnet();
 	m_EmoteType = EMOTE_PAIN;
 	m_EmoteStop = Server()->Tick() + 500 * Server()->TickSpeed() / 1000;
 	m_LastDamageByClient = FromCID;
@@ -1235,6 +1286,7 @@ void CCharacter::Snap(int SnappingClient)
 {
 	if(NetworkClipped(SnappingClient))
 		return;
+	SnapMagnet(SnappingClient);
 
 	CNetObj_Character* pCharacter = static_cast<CNetObj_Character*>(Server()->SnapNewItem(NETOBJTYPE_CHARACTER, m_pPlayer->GetCID(), sizeof(CNetObj_Character)));
 	if(!pCharacter)
@@ -1966,6 +2018,7 @@ bool CCharacter::TryUseMana(int Mana)
 	}
 
 	m_Mana -= Mana;
+	RefillFromMagnet();
 
 	GS()->MarkUpdatedBroadcast(m_pPlayer->GetCID());
 	AutoUseManaPotionIfNeeded();

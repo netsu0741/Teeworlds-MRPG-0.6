@@ -86,10 +86,7 @@ void CEntityDropItem::Tick()
 	// set without owner if there is no player owner
 	if(m_ClientID != -1)
 	{
-		auto* pPlayer = GS()->GetPlayer(m_ClientID, true, true);
-		if(pPlayer && pPlayer->GetItem(itMagnetItems)->IsEquipped())
-			m_Vel += normalize(pPlayer->GetCharacter()->m_Core.m_Pos - m_Pos) * 0.55f;
-		else if(!pPlayer)
+		if(!GS()->GetPlayer(m_ClientID, true, true))
 			m_ClientID = -1;
 	}
 

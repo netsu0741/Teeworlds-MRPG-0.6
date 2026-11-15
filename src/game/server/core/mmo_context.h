@@ -724,7 +724,7 @@ enum
 	itSpiderHook                   = 66,    // Spider hook
 	itCustomizer                   = 96,    // Curomizer for personal skins
 	itDamageEqualizer              = 97,    // Module for dissable self dmg
-	itMagnetItems                  = 185,   // Magnetizes items meant for you
+	itMagnetItems                  = 185,   // Collects map health and mana pickups into orbit
 	itBasicHammerPlus              = 316,   // Increase basic hammer range
 	itBreathingReed                = 318,   // Double the time underwater
 	itLifePreserver                = 319,   // Keeps player afloat
