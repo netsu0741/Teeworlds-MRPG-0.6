@@ -14,6 +14,20 @@ TEST(MagnetReserve, CapacityIncludesIncomingPickups)
 	EXPECT_TRUE(Reserve.Reserve(Resource::Health, 0));
 }
 
+TEST(MagnetReserve, CancelledIncomingPickupFreesItsOwnCapacity)
+{
+	CMagnetReserve Reserve;
+	for(int i = 0; i < 10; ++i)
+	{
+		ASSERT_TRUE(Reserve.Reserve(Resource::Health, 0));
+		ASSERT_TRUE(Reserve.Reserve(Resource::Mana, 0));
+	}
+	Reserve.Cancel(Resource::Health);
+	EXPECT_TRUE(Reserve.Reserve(Resource::Health, 0));
+	EXPECT_FALSE(Reserve.Reserve(Resource::Mana, 0));
+	EXPECT_EQ(Reserve.Stored(Resource::Health), 0);
+}
+
 TEST(MagnetReserve, ThreeLevelsAndConsumptionFreeOrbitSlots)
 {
 	CMagnetReserve Reserve;

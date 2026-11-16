@@ -15,6 +15,7 @@ class CPickup : public CEntity
 	bool m_MagnetEligible {};
 	vec2 m_SpawnPos {};
 	int m_MagnetClientID { -1 };
+	int m_MagnetTicksLeft {};
 	std::weak_ptr<void> m_MagnetLifetime;
 	void CancelMagnet();
 

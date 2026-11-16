@@ -7,6 +7,11 @@
 #include "character.h"
 #include <game/server/core/entities/items/drop_pickup.h>
 
+namespace
+{
+	constexpr int MAGNET_CHASE_SECONDS = 5;
+}
+
 CPickup::CPickup(CGameWorld *pGameWorld, int Type, int SubType, vec2 Pos, bool MagnetEligible)
 : CEntity(pGameWorld, CGameWorld::ENTTYPE_PICKUP, Pos, 14.f)
 {
@@ -38,6 +43,7 @@ void CPickup::CancelMagnet()
 			pCharacter->CancelMagnetPickup(m_Type == POWERUP_HEALTH ? CMagnetReserve::EResource::Health : CMagnetReserve::EResource::Mana);
 	}
 	m_MagnetClientID = -1;
+	m_MagnetTicksLeft = 0;
 	m_MagnetLifetime.reset();
 	if(m_MagnetEligible)
 		m_Pos = m_SpawnPos;
@@ -146,6 +152,7 @@ void CPickup::Tick()
 				if(distance(m_Pos, pCandidate->m_Core.m_Pos) <= 160.f && pCandidate->TryReserveMagnetPickup(Resource))
 				{
 					m_MagnetClientID = pCandidate->GetPlayer()->GetCID();
+					m_MagnetTicksLeft = Server()->TickSpeed() * MAGNET_CHASE_SECONDS;
 					m_MagnetLifetime = pCandidate->MagnetLifetime();
 					break;
 				}
@@ -160,6 +167,12 @@ void CPickup::Tick()
 			{
 				CancelMagnet();
 			}
+			else if(m_MagnetTicksLeft-- <= 0)
+			{
+				CancelMagnet();
+				ScheduleRespawn();
+				return;
+			}
 			else
 			{
 				const vec2 Target = pCharacter->MagnetPickupTarget(Resource);
@@ -169,6 +182,7 @@ void CPickup::Tick()
 				{
 					pCharacter->CaptureMagnetPickup(Resource);
 					m_MagnetClientID = -1;
+					m_MagnetTicksLeft = 0;
 					m_MagnetLifetime.reset();
 					m_Pos = m_SpawnPos;
 					ScheduleRespawn();
