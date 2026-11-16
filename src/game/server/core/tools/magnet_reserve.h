@@ -11,6 +11,8 @@ public:
 	static constexpr int UNITS_PER_ORBIT = 5;
 	static constexpr float ORBIT_RADIUS = 87.0f;
 	static int Slots(int Enchant) { return 2 + std::clamp(Enchant, 0, 2); }
+	static int OrbitPosition(EResource Resource, int Slot) { return Slot * 2 + (Resource == EResource::Mana ? 1 : 0); }
+	int IncomingSlot(EResource Resource, int Enchant) const { return std::min(Stored(Resource) / UNITS_PER_ORBIT, Slots(Enchant) - 1); }
 	bool Reserve(EResource Resource, int Enchant)
 	{
 		auto& Entry = Get(Resource);

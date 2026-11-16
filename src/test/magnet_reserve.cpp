@@ -33,6 +33,26 @@ TEST(MagnetReserve, ThreeLevelsAndConsumptionFreeOrbitSlots)
 	EXPECT_EQ(CMagnetReserve::Slots(2), 4);
 }
 
+TEST(MagnetReserve, SeparateAlternatingPositionsAndLimits)
+{
+	CMagnetReserve Reserve;
+	EXPECT_EQ(CMagnetReserve::OrbitPosition(Resource::Health, 0), 0);
+	EXPECT_EQ(CMagnetReserve::OrbitPosition(Resource::Mana, 0), 1);
+	EXPECT_EQ(CMagnetReserve::OrbitPosition(Resource::Health, 1), 2);
+	EXPECT_EQ(CMagnetReserve::OrbitPosition(Resource::Mana, 1), 3);
+	for(const auto Kind : { Resource::Health, Resource::Mana })
+	{
+		for(int i = 0; i < 10; ++i)
+		{
+			EXPECT_EQ(Reserve.IncomingSlot(Kind, 0), i / 5);
+			ASSERT_TRUE(Reserve.Reserve(Kind, 0));
+			Reserve.Capture(Kind);
+		}
+		EXPECT_EQ(Reserve.Orbits(Kind), 2);
+		EXPECT_FALSE(Reserve.Reserve(Kind, 0));
+	}
+}
+
 TEST(MagnetReserve, IndependentResourcesAndPartialOrbit)
 {
 	CMagnetReserve Reserve;

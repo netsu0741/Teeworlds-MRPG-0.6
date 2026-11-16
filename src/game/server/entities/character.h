@@ -167,6 +167,8 @@ public:
 	bool TryReserveMagnetPickup(CMagnetReserve::EResource Resource);
 	void CancelMagnetPickup(CMagnetReserve::EResource Resource) { m_MagnetReserve.Cancel(Resource); }
 	void CaptureMagnetPickup(CMagnetReserve::EResource Resource) { m_MagnetReserve.Capture(Resource); }
+	vec2 MagnetPickupTarget(CMagnetReserve::EResource Resource) const;
+	vec2 MagnetOrbitPosition(CMagnetReserve::EResource Resource, int Slot) const;
 	void SetEmoticonDDNet(int Emoticon, int Sec, bool SendEmoticon);
 	void SetEmote(int Emote, int Sec, bool SendEmoticon);
 	void SetWeapon(int Weapon);

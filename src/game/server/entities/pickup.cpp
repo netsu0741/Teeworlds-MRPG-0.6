@@ -162,8 +162,7 @@ void CPickup::Tick()
 			}
 			else
 			{
-				const float Angle = 2.0f * pi * Server()->Tick() / (Server()->TickSpeed() * 4.0f);
-				const vec2 Target = pCharacter->m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * CMagnetReserve::ORBIT_RADIUS;
+				const vec2 Target = pCharacter->MagnetPickupTarget(Resource);
 				const float Distance = distance(m_Pos, Target);
 				const float Step = 220.f / Server()->TickSpeed();
 				if(Distance <= Step)

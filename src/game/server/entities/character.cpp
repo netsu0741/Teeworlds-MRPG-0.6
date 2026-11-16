@@ -747,6 +747,19 @@ void CCharacter::RefillFromMagnet()
 	m_Mana += m_MagnetReserve.Consume(CMagnetReserve::EResource::Mana, m_pPlayer->GetMaxMana() - m_Mana);
 }
 
+vec2 CCharacter::MagnetOrbitPosition(CMagnetReserve::EResource Resource, int Slot) const
+{
+	const int Slots = CMagnetReserve::Slots(m_pPlayer->GetItem(itMagnetItems)->GetEnchant());
+	const int Position = CMagnetReserve::OrbitPosition(Resource, Slot);
+	const float Angle = 2.0f * pi * Position / (Slots * 2) + 2.0f * pi * Server()->Tick() / (Server()->TickSpeed() * 4.0f);
+	return m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * CMagnetReserve::ORBIT_RADIUS;
+}
+
+vec2 CCharacter::MagnetPickupTarget(CMagnetReserve::EResource Resource) const
+{
+	return MagnetOrbitPosition(Resource, m_MagnetReserve.IncomingSlot(Resource, m_pPlayer->GetItem(itMagnetItems)->GetEnchant()));
+}
+
 void CCharacter::SnapMagnet(int SnappingClient)
 {
 	if(!m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed() || !m_pPlayer->GetItem(itMagnetItems)->IsEquipped())
@@ -754,20 +767,14 @@ void CCharacter::SnapMagnet(int SnappingClient)
 	const auto* pIDs = FindSnappingGroupIds(MAGNET_SNAP_GROUP);
 	if(!pIDs)
 		return;
-	int Health = m_MagnetReserve.Orbits(CMagnetReserve::EResource::Health);
-	int Mana = m_MagnetReserve.Orbits(CMagnetReserve::EResource::Mana);
-	const int Count = Health + Mana;
-	if(!Count)
-		return;
-	bool NextHealth = true;
-	for(int i = 0; i < Count; ++i)
+	for(const auto Resource : { CMagnetReserve::EResource::Health, CMagnetReserve::EResource::Mana })
 	{
-		const bool UseHealth = Health > 0 && (Mana == 0 || NextHealth);
-		if(UseHealth) --Health; else --Mana;
-		NextHealth = !UseHealth;
-		const float Angle = 2.0f * pi * i / Count + 2.0f * pi * Server()->Tick() / (Server()->TickSpeed() * 4.0f);
-		const vec2 Pos = m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * CMagnetReserve::ORBIT_RADIUS;
-		GS()->SnapPickup(SnappingClient, (*pIDs)[i], Pos, UseHealth ? POWERUP_HEALTH : POWERUP_ARMOR);
+		for(int Slot = 0; Slot < m_MagnetReserve.Orbits(Resource); ++Slot)
+		{
+			const int Position = CMagnetReserve::OrbitPosition(Resource, Slot);
+			GS()->SnapPickup(SnappingClient, (*pIDs)[Position], MagnetOrbitPosition(Resource, Slot),
+				Resource == CMagnetReserve::EResource::Health ? POWERUP_HEALTH : POWERUP_ARMOR);
+		}
 	}
 }
 
