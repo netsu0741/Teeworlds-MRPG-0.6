@@ -9,6 +9,7 @@ class CMagnetReserve
 public:
 	enum class EResource { Health, Mana };
 	static constexpr int UNITS_PER_ORBIT = 5;
+	static constexpr float ORBIT_RADIUS = 72.5f;
 	static int Slots(int Enchant) { return 2 + std::clamp(Enchant, 0, 2); }
 	bool Reserve(EResource Resource, int Enchant)
 	{

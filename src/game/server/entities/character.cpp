@@ -1,4 +1,4 @@
-﻿/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
+/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "character.h"
 #include <generated/server_data.h>
@@ -766,7 +766,7 @@ void CCharacter::SnapMagnet(int SnappingClient)
 		if(UseHealth) --Health; else --Mana;
 		NextHealth = !UseHealth;
 		const float Angle = 2.0f * pi * i / Count + 2.0f * pi * Server()->Tick() / (Server()->TickSpeed() * 4.0f);
-		const vec2 Pos = m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * 58.0f;
+		const vec2 Pos = m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * CMagnetReserve::ORBIT_RADIUS;
 		GS()->SnapPickup(SnappingClient, (*pIDs)[i], Pos, UseHealth ? POWERUP_HEALTH : POWERUP_ARMOR);
 	}
 }
