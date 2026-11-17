@@ -75,8 +75,7 @@ protected:
 	bool m_Alive {};
 	int m_Health {};
 	int m_Mana {};
-	CMagnetReserve m_MagnetReserve;
-	std::shared_ptr<void> m_MagnetLifetime = std::make_shared<int>(0);
+	std::shared_ptr<CMagnetReserve> m_MagnetReserve = std::make_shared<CMagnetReserve>();
 	void RefillFromMagnet();
 	void SnapMagnet(int SnappingClient);
 	int m_ReckoningTick {};
@@ -163,10 +162,8 @@ public:
 	void SetSafeFlags(int Flags = SAFEFLAG_DAMAGE_DISABLED | SAFEFLAG_HAMMER_HIT_DISABLED | SAFEFLAG_COLLISION_DISABLED | SAFEFLAG_HOOK_HIT_DISABLED) { m_SafeTickFlags = Flags; }
 	virtual bool IsAllowedPVP(int FromID) const;
 	bool IsAlive() const { return m_Alive; }
-	std::weak_ptr<void> MagnetLifetime() const { return m_MagnetLifetime; }
-	bool TryReserveMagnetPickup(CMagnetReserve::EResource Resource);
-	void CancelMagnetPickup(CMagnetReserve::EResource Resource) { m_MagnetReserve.Cancel(Resource); }
-	void CaptureMagnetPickup(CMagnetReserve::EResource Resource) { m_MagnetReserve.Capture(Resource); }
+	bool TryReserveMagnetPickup(CMagnetReservation& Reservation, CMagnetReserve::EResource Resource);
+	bool OwnsMagnetReservation(const CMagnetReservation& Reservation) const { return Reservation.BelongsTo(m_MagnetReserve); }
 	vec2 MagnetPickupTarget(CMagnetReserve::EResource Resource) const;
 	vec2 MagnetOrbitPosition(CMagnetReserve::EResource Resource, int Slot) const;
 	void SetEmoticonDDNet(int Emoticon, int Sec, bool SendEmoticon);

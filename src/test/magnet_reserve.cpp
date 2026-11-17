@@ -28,6 +28,36 @@ TEST(MagnetReserve, CancelledIncomingPickupFreesItsOwnCapacity)
 	EXPECT_EQ(Reserve.Stored(Resource::Health), 0);
 }
 
+TEST(MagnetReserve, ReservationReleasesCapacityOnDestruction)
+{
+	auto pReserve = std::make_shared<CMagnetReserve>();
+	{
+		CMagnetReservation Reservation;
+		ASSERT_TRUE(Reservation.TryAcquire(pReserve, Resource::Health, 0));
+		EXPECT_TRUE(Reservation.BelongsTo(pReserve));
+		for(int i = 0; i < 9; ++i)
+			ASSERT_TRUE(pReserve->Reserve(Resource::Health, 0));
+		EXPECT_FALSE(pReserve->Reserve(Resource::Health, 0));
+	}
+	EXPECT_TRUE(pReserve->Reserve(Resource::Health, 0));
+}
+
+TEST(MagnetReserve, ReservationCaptureAndExpiredOwner)
+{
+	auto pReserve = std::make_shared<CMagnetReserve>();
+	CMagnetReservation Reservation;
+	ASSERT_TRUE(Reservation.TryAcquire(pReserve, Resource::Mana, 0));
+	Reservation.Capture();
+	Reservation.Cancel();
+	EXPECT_EQ(pReserve->Stored(Resource::Mana), 1);
+	ASSERT_TRUE(Reservation.TryAcquire(pReserve, Resource::Health, 0));
+	pReserve.reset();
+	Reservation.Cancel();
+	auto pNewReserve = std::make_shared<CMagnetReserve>();
+	EXPECT_FALSE(Reservation.BelongsTo(pNewReserve));
+	EXPECT_TRUE(Reservation.TryAcquire(pNewReserve, Resource::Health, 0));
+}
+
 TEST(MagnetReserve, ThreeLevelsAndConsumptionFreeOrbitSlots)
 {
 	CMagnetReserve Reserve;

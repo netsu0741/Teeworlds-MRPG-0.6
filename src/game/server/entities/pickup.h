@@ -3,7 +3,7 @@
 #ifndef GAME_SERVER_ENTITIES_PICKUP_H
 #define GAME_SERVER_ENTITIES_PICKUP_H
 #include <game/server/entity.h>
-#include <memory>
+#include <game/server/core/tools/magnet_reserve.h>
 
 class CEntityDropPickup;
 class CPickup : public CEntity
@@ -16,12 +16,12 @@ class CPickup : public CEntity
 	vec2 m_SpawnPos {};
 	int m_MagnetClientID { -1 };
 	int m_MagnetTicksLeft {};
-	std::weak_ptr<void> m_MagnetLifetime;
+	CMagnetReservation m_MagnetReservation;
 	void CancelMagnet();
+	bool TickMagnet();
 
 public:
 	CPickup(CGameWorld *pGameWorld, int Type, int SubType, vec2 Pos, bool MagnetEligible = false);
-	~CPickup() override;
 	CPickup(CGameWorld *pGameWorld, int ProjType, vec2 Pos);
 
 	bool CanMakeDrop() const;

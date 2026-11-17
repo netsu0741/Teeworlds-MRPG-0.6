@@ -10,6 +10,8 @@
 namespace
 {
 	constexpr int MAGNET_CHASE_SECONDS = 5;
+	constexpr float MAGNET_RANGE = 160.f;
+	constexpr float MAGNET_SPEED = 220.f;
 }
 
 CPickup::CPickup(CGameWorld *pGameWorld, int Type, int SubType, vec2 Pos, bool MagnetEligible)
@@ -28,23 +30,11 @@ CPickup::CPickup(CGameWorld *pGameWorld, int ProjType, vec2 Pos)
 	GameWorld()->InsertEntity(this);
 }
 
-CPickup::~CPickup()
-{
-	CancelMagnet();
-}
-
 void CPickup::CancelMagnet()
 {
-	if(m_MagnetClientID >= 0)
-	{
-		auto* pPlayer = GS()->GetPlayer(m_MagnetClientID, false);
-		auto* pCharacter = pPlayer ? pPlayer->GetCharacter() : nullptr;
-		if(pCharacter && !m_MagnetLifetime.expired() && m_MagnetLifetime.lock() == pCharacter->MagnetLifetime().lock())
-			pCharacter->CancelMagnetPickup(m_Type == POWERUP_HEALTH ? CMagnetReserve::EResource::Health : CMagnetReserve::EResource::Mana);
-	}
+	m_MagnetReservation.Cancel();
 	m_MagnetClientID = -1;
 	m_MagnetTicksLeft = 0;
-	m_MagnetLifetime.reset();
 	if(m_MagnetEligible)
 		m_Pos = m_SpawnPos;
 }
@@ -127,6 +117,56 @@ bool CPickup::ApplyTo(CCharacter* pChar, int Type, int Subtype)
 	return Picked;
 }
 
+bool CPickup::TickMagnet()
+{
+	if(m_Type != POWERUP_HEALTH && m_Type != POWERUP_ARMOR)
+		return false;
+
+	const auto Resource = m_Type == POWERUP_HEALTH ? CMagnetReserve::EResource::Health : CMagnetReserve::EResource::Mana;
+	if(m_MagnetClientID < 0)
+	{
+		for(auto* pCandidate = static_cast<CCharacter*>(GameWorld()->FindFirst(CGameWorld::ENTTYPE_CHARACTER)); pCandidate; pCandidate = static_cast<CCharacter*>(pCandidate->TypeNext()))
+		{
+			if(distance_squared(m_Pos, pCandidate->m_Core.m_Pos) <= MAGNET_RANGE * MAGNET_RANGE && pCandidate->TryReserveMagnetPickup(m_MagnetReservation, Resource))
+			{
+				m_MagnetClientID = pCandidate->GetPlayer()->GetCID();
+				m_MagnetTicksLeft = Server()->TickSpeed() * MAGNET_CHASE_SECONDS;
+				break;
+			}
+		}
+	}
+	if(m_MagnetClientID < 0)
+		return false;
+
+	auto* pPlayer = GS()->GetPlayer(m_MagnetClientID, false);
+	auto* pCharacter = pPlayer ? pPlayer->GetCharacter() : nullptr;
+	if(!pCharacter || !pCharacter->IsAlive() || !pCharacter->OwnsMagnetReservation(m_MagnetReservation) ||
+		!pPlayer->IsAuthed() || !pPlayer->GetItem(itMagnetItems)->IsEquipped())
+	{
+		CancelMagnet();
+		return false;
+	}
+	if(m_MagnetTicksLeft-- <= 0)
+	{
+		CancelMagnet();
+		ScheduleRespawn();
+		return true;
+	}
+
+	const vec2 Offset = pCharacter->MagnetPickupTarget(Resource) - m_Pos;
+	const float DistanceSquared = length_squared(Offset);
+	const float Step = MAGNET_SPEED / Server()->TickSpeed();
+	if(DistanceSquared <= Step * Step)
+	{
+		m_MagnetReservation.Capture();
+		CancelMagnet();
+		ScheduleRespawn();
+	}
+	else
+		m_Pos += Offset * (Step / sqrtf(DistanceSquared));
+	return true;
+}
+
 void CPickup::Tick()
 {
 	if(m_SpawnTick != -1)
@@ -142,57 +182,8 @@ void CPickup::Tick()
 	if((!HasPlayersInView() && m_MagnetClientID < 0) || m_Projectile)
 		return;
 
-	if(m_MagnetEligible && (m_Type == POWERUP_HEALTH || m_Type == POWERUP_ARMOR))
-	{
-		const auto Resource = m_Type == POWERUP_HEALTH ? CMagnetReserve::EResource::Health : CMagnetReserve::EResource::Mana;
-		if(m_MagnetClientID < 0)
-		{
-			for(auto* pCandidate = static_cast<CCharacter*>(GameWorld()->FindFirst(CGameWorld::ENTTYPE_CHARACTER)); pCandidate; pCandidate = static_cast<CCharacter*>(pCandidate->TypeNext()))
-			{
-				if(distance(m_Pos, pCandidate->m_Core.m_Pos) <= 160.f && pCandidate->TryReserveMagnetPickup(Resource))
-				{
-					m_MagnetClientID = pCandidate->GetPlayer()->GetCID();
-					m_MagnetTicksLeft = Server()->TickSpeed() * MAGNET_CHASE_SECONDS;
-					m_MagnetLifetime = pCandidate->MagnetLifetime();
-					break;
-				}
-			}
-		}
-		if(m_MagnetClientID >= 0)
-		{
-			auto* pPlayer = GS()->GetPlayer(m_MagnetClientID, false);
-			auto* pCharacter = pPlayer ? pPlayer->GetCharacter() : nullptr;
-			if(!pCharacter || !pCharacter->IsAlive() || m_MagnetLifetime.expired() ||
-				m_MagnetLifetime.lock() != pCharacter->MagnetLifetime().lock() || !pPlayer->IsAuthed() || !pPlayer->GetItem(itMagnetItems)->IsEquipped())
-			{
-				CancelMagnet();
-			}
-			else if(m_MagnetTicksLeft-- <= 0)
-			{
-				CancelMagnet();
-				ScheduleRespawn();
-				return;
-			}
-			else
-			{
-				const vec2 Target = pCharacter->MagnetPickupTarget(Resource);
-				const float Distance = distance(m_Pos, Target);
-				const float Step = 220.f / Server()->TickSpeed();
-				if(Distance <= Step)
-				{
-					pCharacter->CaptureMagnetPickup(Resource);
-					m_MagnetClientID = -1;
-					m_MagnetTicksLeft = 0;
-					m_MagnetLifetime.reset();
-					m_Pos = m_SpawnPos;
-					ScheduleRespawn();
-				}
-				else
-					m_Pos += normalize(Target - m_Pos) * Step;
-				return;
-			}
-		}
-	}
+	if(m_MagnetEligible && TickMagnet())
+		return;
 
 	auto* pChar = static_cast<CCharacter*>(GameWorld()->ClosestEntity(m_Pos, 20.f, CGameWorld::ENTTYPE_CHARACTER, nullptr));
 	if(ApplyTo(pChar, m_Type, m_SubType))
