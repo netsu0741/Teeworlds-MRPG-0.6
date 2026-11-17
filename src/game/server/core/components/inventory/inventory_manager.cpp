@@ -33,9 +33,7 @@ void CInventoryManager::OnPreInit()
 	{
 		const auto ItemID = pRes->getInt("ID");
 		const auto Name = pRes->getString("Name");
-		auto Description = pRes->getString("Description");
-		if(ItemID == itMagnetItems && Description == "Collects health and mana pickups into orbit")
-			Description = "Collect health and mana pickups into orbit";
+		const auto Description = pRes->getString("Description");
 		const auto GroupSet = DBSet(pRes->getString("Group"));
 		const auto TypeSet = DBSet(pRes->getString("Type"));
 		const auto FlagsSet = DBSet(pRes->getString("Flags"));
