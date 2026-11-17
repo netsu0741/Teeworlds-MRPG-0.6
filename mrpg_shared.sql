@@ -1463,7 +1463,7 @@ INSERT INTO `tw_items_list` (`Comment`, `ID`, `Name`, `Description`, `Group`, `T
 (NULL, 182, 'Salmon', 'Premium, rich in flavor', 'Resource', 'Resource fishes', NULL, NULL, 'universal', 25, NULL, NULL, NULL, NULL, NULL, NULL),
 (NULL, 183, 'Sturgeon', 'Ancient, prized catch', 'Resource', 'Resource fishes', NULL, NULL, 'universal', 28, NULL, NULL, NULL, NULL, NULL, NULL),
 (NULL, 184, 'Swordfish', 'Dramatic giant hunter', 'Resource', 'Resource fishes', NULL, NULL, 'universal', 30, NULL, NULL, NULL, NULL, NULL, NULL),
-('Не реализ', 185, 'Magnet for items', 'Magnetizes items meant for you', 'Equipment', 'Default', NULL, NULL, 'universal', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+('Не реализ', 185, 'Magnet for items', 'Collect health and mana pickups into orbit', 'Equipment', 'Default', NULL, NULL, 'universal', NULL, NULL, NULL, NULL, NULL, NULL, NULL),
 (NULL, 186, 'Pig meat', 'The meat of a pig? Old version', 'Resource', 'Default', NULL, NULL, 'universal', 11, NULL, NULL, NULL, NULL, NULL, NULL),
 (NULL, 187, 'Scavenger', 'Title for DPS', 'Equipment', 'Equip title', NULL, NULL, 'universal', 7000, NULL, 2, 4, 50, 50, NULL),
 (NULL, 188, 'Copper gloves', 'The usual copper loader gloves', 'Equipment', 'Equip gloves', NULL, NULL, 'universal', 3240, NULL, 22, NULL, 15, NULL, NULL),

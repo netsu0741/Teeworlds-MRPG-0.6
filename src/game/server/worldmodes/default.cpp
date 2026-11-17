@@ -141,12 +141,12 @@ void CGameControllerDefault::OnEntity(int Index, vec2 Pos, int Flags)
 
 	else if(Index == ENTITY_ARMOR_1)
 	{
-		new CPickup(&GS()->m_World, POWERUP_ARMOR, 0, Pos);
+		new CPickup(&GS()->m_World, POWERUP_ARMOR, 0, Pos, true);
 	}
 
 	else if(Index == ENTITY_HEALTH_1)
 	{
-		new CPickup(&GS()->m_World, POWERUP_HEALTH, 0, Pos);
+		new CPickup(&GS()->m_World, POWERUP_HEALTH, 0, Pos, true);
 	}
 
 	else if(Index == ENTITY_PICKUP_SHOTGUN)

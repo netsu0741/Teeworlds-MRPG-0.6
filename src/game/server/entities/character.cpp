@@ -1,4 +1,4 @@
-﻿/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
+/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "character.h"
 #include <generated/server_data.h>
@@ -722,11 +722,68 @@ void CCharacter::ResetInput()
 	m_LatestPrevInput = m_LatestInput = m_Input;
 }
 
+namespace
+{
+	constexpr int MAGNET_SNAP_GROUP = 18001;
+}
+
+bool CCharacter::TryReserveMagnetPickup(CMagnetReserve::EResource Resource)
+{
+	if(!m_Alive || !m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed())
+		return false;
+	auto* pMagnet = m_pPlayer->GetItem(itMagnetItems);
+	if(!pMagnet->IsEquipped() || !m_MagnetReserve.Reserve(Resource, pMagnet->GetEnchant()))
+		return false;
+	if(!FindSnappingGroupIds(MAGNET_SNAP_GROUP))
+		AddSnappingGroupIds(MAGNET_SNAP_GROUP, 8);
+	return true;
+}
+
+void CCharacter::RefillFromMagnet()
+{
+	if(!m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed() || !m_pPlayer->GetItem(itMagnetItems)->IsEquipped())
+		return;
+	m_Health += m_MagnetReserve.Consume(CMagnetReserve::EResource::Health, m_pPlayer->GetMaxHealth() - m_Health);
+	m_Mana += m_MagnetReserve.Consume(CMagnetReserve::EResource::Mana, m_pPlayer->GetMaxMana() - m_Mana);
+}
+
+vec2 CCharacter::MagnetOrbitPosition(CMagnetReserve::EResource Resource, int Slot) const
+{
+	const int Slots = CMagnetReserve::Slots(m_pPlayer->GetItem(itMagnetItems)->GetEnchant());
+	const int Position = CMagnetReserve::OrbitPosition(Resource, Slot);
+	const float Angle = 2.0f * pi * Position / (Slots * 2) + 2.0f * pi * Server()->Tick() / (Server()->TickSpeed() * 4.0f);
+	return m_Core.m_Pos + vec2(cosf(Angle), sinf(Angle)) * CMagnetReserve::ORBIT_RADIUS;
+}
+
+vec2 CCharacter::MagnetPickupTarget(CMagnetReserve::EResource Resource) const
+{
+	return MagnetOrbitPosition(Resource, m_MagnetReserve.IncomingSlot(Resource, m_pPlayer->GetItem(itMagnetItems)->GetEnchant()));
+}
+
+void CCharacter::SnapMagnet(int SnappingClient)
+{
+	if(!m_pPlayer || m_pPlayer->IsBot() || !m_pPlayer->IsAuthed() || !m_pPlayer->GetItem(itMagnetItems)->IsEquipped())
+		return;
+	const auto* pIDs = FindSnappingGroupIds(MAGNET_SNAP_GROUP);
+	if(!pIDs)
+		return;
+	for(const auto Resource : { CMagnetReserve::EResource::Health, CMagnetReserve::EResource::Mana })
+	{
+		for(int Slot = 0; Slot < m_MagnetReserve.Orbits(Resource); ++Slot)
+		{
+			const int Position = CMagnetReserve::OrbitPosition(Resource, Slot);
+			GS()->SnapPickup(SnappingClient, (*pIDs)[Position], MagnetOrbitPosition(Resource, Slot),
+				Resource == CMagnetReserve::EResource::Health ? POWERUP_HEALTH : POWERUP_ARMOR);
+		}
+	}
+}
+
 void CCharacter::Tick()
 {
 	if(!m_Alive)
 		return;
 
+	RefillFromMagnet();
 	// check world access
 	if(!CanAccessWorld())
 		return;
@@ -1184,6 +1241,7 @@ bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon, int
 
 	Damage += CritDamage;
 	m_Health -= Damage;
+	RefillFromMagnet();
 	m_EmoteType = EMOTE_PAIN;
 	m_EmoteStop = Server()->Tick() + 500 * Server()->TickSpeed() / 1000;
 	m_LastDamageByClient = FromCID;
@@ -1235,6 +1293,7 @@ void CCharacter::Snap(int SnappingClient)
 {
 	if(NetworkClipped(SnappingClient))
 		return;
+	SnapMagnet(SnappingClient);
 
 	CNetObj_Character* pCharacter = static_cast<CNetObj_Character*>(Server()->SnapNewItem(NETOBJTYPE_CHARACTER, m_pPlayer->GetCID(), sizeof(CNetObj_Character)));
 	if(!pCharacter)
@@ -1966,6 +2025,7 @@ bool CCharacter::TryUseMana(int Mana)
 	}
 
 	m_Mana -= Mana;
+	RefillFromMagnet();
 
 	GS()->MarkUpdatedBroadcast(m_pPlayer->GetCID());
 	AutoUseManaPotionIfNeeded();

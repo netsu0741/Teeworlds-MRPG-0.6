@@ -33,7 +33,9 @@ void CInventoryManager::OnPreInit()
 	{
 		const auto ItemID = pRes->getInt("ID");
 		const auto Name = pRes->getString("Name");
-		const auto Description = pRes->getString("Description");
+		auto Description = pRes->getString("Description");
+		if(ItemID == itMagnetItems && Description == "Collects health and mana pickups into orbit")
+			Description = "Collect health and mana pickups into orbit";
 		const auto GroupSet = DBSet(pRes->getString("Group"));
 		const auto TypeSet = DBSet(pRes->getString("Type"));
 		const auto FlagsSet = DBSet(pRes->getString("Flags"));
@@ -385,12 +387,27 @@ bool CInventoryManager::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, 
 		return true;
 	}
 
+	// Magnet has three capacity levels. No upgrade price has been configured;
+	// upgrading is free rather than silently charging an arbitrary currency.
+	if(PPSTR(pCmd, "UPGRADE_MAGNET") == 0)
+	{
+		auto* pMagnet = pPlayer->GetItem(itMagnetItems);
+		if(!pMagnet->HasItem() || pMagnet->GetEnchant() >= 2)
+			return true;
+		if(pMagnet->SetEnchant(maximum(0, pMagnet->GetEnchant()) + 1))
+			GS()->Chat(ClientID, "Magnet upgraded to level {}.", pMagnet->GetEnchant() + 1);
+		pPlayer->m_VotesData.UpdateCurrentVotes();
+		return true;
+	}
+
 	// Enchant item
 	if(PPSTR(pCmd, "ENCHANT_ITEM") == 0)
 	{
         const int ItemID = GetIfExists<int>(Extras, 0, NOPE);
 		// check enchant max level
 		auto* pPlayerItem = pPlayer->GetItem(ItemID);
+		if(ItemID == itMagnetItems || !pPlayerItem->HasItem() || !pPlayerItem->Info()->IsEnchantable())
+			return true;
 		if(pPlayerItem->IsEnchantMaxLevel())
 		{
 			GS()->Chat(ClientID, "Enchantment level is maximum");
@@ -657,8 +674,16 @@ void CInventoryManager::ItemSelected(CPlayer* pPlayer, const CPlayerItem* pItem)
 		}
 	}
 
+	if(ItemID == itMagnetItems && pItem->HasItem())
+	{
+		const int Level = 1 + clamp(pItem->GetEnchant(), 0, 2);
+		VItem.Add("Magnet level {}: {} heart and {} shield slots (5 each)", Level, Level + 1, Level + 1);
+		if(Level < 3)
+			VItem.AddOption("UPGRADE_MAGNET", ItemID, "Upgrade magnet to level {} (free)", Level + 1);
+	}
+
 	// is enchantable
-	if(pInfo->IsEnchantable() && !pItem->IsEnchantMaxLevel())
+	if(ItemID != itMagnetItems && pInfo->IsEnchantable() && !pItem->IsEnchantMaxLevel())
 	{
 		const int Price = pItem->GetEnchantPrice();
 		VItem.AddOption("ENCHANT_ITEM", ItemID, "Enchant ({}m)", Price);
